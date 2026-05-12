@@ -1,6 +1,6 @@
 # Think Farm
 
-A distributed local LLM inference sharing system that lets you **provide** your local Ollama models to a network and **consume** models from other nodes — all presented through a unified **OpenAI-compatible API**.
+A distributed local LLM inference sharing system that lets you **provide** your local Ollama models to a network and **consume** models from other nodes - all presented through a unified **OpenAI-compatible API**.
 
 Think Farm consists of two roles:
 
@@ -11,22 +11,61 @@ Think Farm consists of two roles:
 
 ## Architecture
 
+```mermaid
+flowchart TB
+    ClientApps[Client Apps<br/>(OpenAI / Ollama compatible)] -->|HTTP POST| Consumer
+
+    subgraph Consumer[Consumer]
+        ConsumerAPI[FastAPI Server<br/>localhost:11435]
+        ConsumerAPI -->|Proxy| OpenAIGW[OpenAI API Gateway]
+        ConsumerAPI -->|Proxy| OllamaGW[Ollama API Gateway]
+        OpenAIGW & OllamaGW --> Streaming[Streaming Response]
+    end
+
+    subgraph ThinkFarm[Think Farm Network]
+        WS[WebSocket<br/>Job Routing]
+    end
+
+    subgraph Provider[Provider]
+        StatusMgmt[Status Management]
+        JobHandler[Job Handler]
+        Mgr[Model Manager<br/>VRAM Optimization]
+        Prober[Context Prober<br/>Model Introspection]
+    end
+
+    Consumer <--> WS <--> Provider
+
+    Provider -->|Model List / Pull / Delete| OllamaCLI
+    Mgr -->|VRAM Calculations| Prober
+    Prober -->|Query| Ollama[Local Ollama Instance
+(localhost:11434)]
+    Provider -->|Inference| Ollama
 ```
-+--------------+        Think Farm Network        +--------------+
-|   Provider    | <==>  (websocket, job routing)  |   Consumer    |
-|              |                                  |              |
-| - Model Mgr  |                                  | - FastAPI     |
-| - Context    |                                  | - OpenAI API  |
-|   Prober     |                                  |   gateway     |
-| - Ollama CLI |                                  |   (streaming) |
-+--------------+                                  +--------------+
-       |                                                |
-       v                                                v
-  +---------+                                    +---------+
-  |  Ollama |                                    |  Client |
-  |  Local  |                                    |  Apps   |
-  +---------+                                    +---------+
-```
+
+**Data flow:**
+
+1. **Client** sends request to the Consumer's local server (e.g., `http://localhost:11435/v1/chat/completions`)
+2. **Consumer** selects an available model and routes the request via WebSocket to the Think Farm network
+3. **Provider** receives the job, pulls/loads the model on its local Ollama instance if needed, and executes the inference
+4. Results stream back through the network to the Consumer, then to the Client
+
+## Screenshots
+
+### Provider
+
+The Provider GUI shows your local Ollama models and their VRAM requirements, with the option to preload, load, or use as embedding models:
+
+![Provider GUI](assets/provider.webp "Think Farm Provider")
+
+The top panel lists remote models available from the network with their VRAM requirements. The bottom panel shows your local provider models with checkboxes for how each should be used (preload, load, as embedding).
+
+### Consumer
+
+The Consumer GUI lists available remote models from the Think Farm network, with VRAM requirements and provider information:
+
+![Consumer GUI](assets/consumer.webp "Think Farm Consumer")
+
+The top panel lists discoverable models with context length, VRAM requirements, and the providing node. The bottom panel shows locally managed models. You can filter and select which models to expose via the local API server.
 
 ## Quick Start
 
@@ -65,9 +104,9 @@ python -m provider.provider
 ```
 
 The Provider manages:
-- **Model lifecycle** — automatically pulls, loads, and unloads models based on demand and VRAM constraints.
-- **Context probing** — introspects each model's context window and prefill limits via Ollama.
-- **VRAM optimization** — maintains a model portfolio that fits within available GPU memory.
+- **Model lifecycle** - automatically pulls, loads, and unloads models based on demand and VRAM constraints.
+- **Context probing** - introspects each model's context window and prefill limits via Ollama.
+- **VRAM optimization** - maintains a model portfolio that fits within available GPU memory.
 
 ### Consumer Setup
 
@@ -86,7 +125,7 @@ The Consumer:
 - Runs a local FastAPI server on `localhost:11435`.
 - Proxies `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, and Ollama-compatible endpoints to the selected provider.
 - Supports streaming responses and configurable model whitelisting/filters.
-- Tray-icon aware — minimize to system tray instead of closing.
+- Tray-icon aware - minimize to system tray instead of closing.
 
 ### Configuration
 
@@ -154,9 +193,9 @@ Once the Consumer is running, it exposes the following endpoints at `http://loca
 
 The Provider uses a three-tier model management system:
 
-1. **Context Probing** — discovers model context windows and prefill limits by querying Ollama directly.
-2. **Model Manager** — calculates VRAM requirements and optimizes which models to keep loaded.
-3. **Managed Model Loop** — continuously monitors availability and demand, pulling/unloading models to maintain the optimal portfolio.
+1. **Context Probing** - discovers model context windows and prefill limits by querying Ollama directly.
+2. **Model Manager** - calculates VRAM requirements and optimizes which models to keep loaded.
+3. **Managed Model Loop** - continuously monitors availability and demand, pulling/unloading models to maintain the optimal portfolio.
 
 ## Consumer Internals
 
@@ -168,11 +207,11 @@ The Provider uses a three-tier model management system:
 
 ### Features
 
-- **Model filtering** — select which remote models to expose locally.
-- **Whitelist management** — control which models are available for inference.
-- **Server health polling** — automatically checks and reconnects to the Think Farm network.
-- **Streaming inference** — supports real-time streaming responses.
-- **System tray** — non-intrusive background operation on desktop.
+- **Model filtering** - select which remote models to expose locally.
+- **Whitelist management** - control which models are available for inference.
+- **Server health polling** - automatically checks and reconnects to the Think Farm network.
+- **Streaming inference** - supports real-time streaming responses.
+- **System tray** - non-intrusive background operation on desktop.
 
 ## Development
 
