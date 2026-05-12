@@ -1,12 +1,14 @@
-# Think Farm
+# thinkFarm
 
 A distributed local LLM inference sharing system that lets you **provide** your local Ollama models to a network and **consume** models from other nodes - all presented through a unified **OpenAI-compatible API**.
 
+Visit [www.thinkfarm.net](https://www.thinkfarm.net) for the full project site.
+
 Think Farm consists of two roles:
 
-| Role | What it does |
-|------|-------------|
-| **Provider** | Exposes your local Ollama models to the Think Farm network, with smart VRAM-aware model management and context probing. |
+| Role         | What it does                                                                                                                                                                      |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Provider** | Exposes your local Ollama models to the Think Farm network, with smart VRAM-aware model management and context probing.                                                           |
 | **Consumer** | Listens to the network for available models and presents them as a local server (`localhost:11435`) with OpenAI-compatible endpoints (`/chat`, `/generate`, `/embeddings`, etc.). |
 
 ## Architecture
@@ -103,6 +105,7 @@ python -m provider.provider
 ```
 
 The Provider manages:
+
 - **Model lifecycle** - automatically pulls, loads, and unloads models based on demand and VRAM constraints.
 - **Context probing** - introspects each model's context window and prefill limits via Ollama.
 - **VRAM optimization** - maintains a model portfolio that fits within available GPU memory.
@@ -120,6 +123,7 @@ python -m consumer.main
 ```
 
 The Consumer:
+
 - Connects to the Think Farm network and discovers available models.
 - Runs a local FastAPI server on `localhost:11435`.
 - Proxies `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, and Ollama-compatible endpoints to the selected provider.
@@ -154,39 +158,39 @@ Once the Consumer is running, it exposes the following endpoints at `http://loca
 
 ### OpenAI-Compatible
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v1/chat/completions` | POST | Chat completions (streaming supported) |
-| `/v1/completions` | POST | Legacy completions |
-| `/v1/embeddings` | POST | Embeddings |
-| `/v1/models` | GET | Available models |
-| `/v1/responses` | POST | OpenAI Responses API |
+| Endpoint               | Method | Description                            |
+| ---------------------- | ------ | -------------------------------------- |
+| `/v1/chat/completions` | POST   | Chat completions (streaming supported) |
+| `/v1/completions`      | POST   | Legacy completions                     |
+| `/v1/embeddings`       | POST   | Embeddings                             |
+| `/v1/models`           | GET    | Available models                       |
+| `/v1/responses`        | POST   | OpenAI Responses API                   |
 
 ### Ollama-Compatible
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/generate` | POST | Generate text |
-| `/api/chat` | POST | Chat with messages |
-| `/api/embed` | POST | Generate embeddings |
-| `/api/tags` | GET | List available models |
-| `/api/ps` | GET | Check current inference status |
-| `/health` | GET | Health check |
-| `/version` | GET | Version info |
+| Endpoint        | Method | Description                    |
+| --------------- | ------ | ------------------------------ |
+| `/api/generate` | POST   | Generate text                  |
+| `/api/chat`     | POST   | Chat with messages             |
+| `/api/embed`    | POST   | Generate embeddings            |
+| `/api/tags`     | GET    | List available models          |
+| `/api/ps`       | GET    | Check current inference status |
+| `/health`       | GET    | Health check                   |
+| `/version`      | GET    | Version info                   |
 
 ## Provider Internals
 
 ### Components
 
-| File | Purpose |
-|------|---------|
-| `provider/solo.py` | Core provider logic: status management, job handling, WebSocket communication |
-| `provider/model_manager.py` | VRAM-aware model portfolio optimization |
-| `provider/context_prober.py` | Ollama model introspection (context limits, prefill info, model metadata) |
-| `provider/ollama_client.py` | Ollama API client wrapper (model list, pull, delete, generate, chat, embeddings) |
-| `provider/provider.py` | GUI application for the Provider |
-| `provider/baseprovider.py` | Base class shared by Provider implementations |
-| `provider/headless.py` | CLI front-end (start/stop/status via PID) |
+| File                         | Purpose                                                                          |
+| ---------------------------- | -------------------------------------------------------------------------------- |
+| `provider/solo.py`           | Core provider logic: status management, job handling, WebSocket communication    |
+| `provider/model_manager.py`  | VRAM-aware model portfolio optimization                                          |
+| `provider/context_prober.py` | Ollama model introspection (context limits, prefill info, model metadata)        |
+| `provider/ollama_client.py`  | Ollama API client wrapper (model list, pull, delete, generate, chat, embeddings) |
+| `provider/provider.py`       | GUI application for the Provider                                                 |
+| `provider/baseprovider.py`   | Base class shared by Provider implementations                                    |
+| `provider/headless.py`       | CLI front-end (start/stop/status via PID)                                        |
 
 ### Model Management
 
@@ -198,11 +202,11 @@ The Provider uses a three-tier model management system:
 
 ## Consumer Internals
 
-| File | Purpose |
-|------|---------|
-| `consumer/main.py` | FastAPI application: routing, streaming, OpenAI + Ollama API compatibility |
-| `consumer/consumer.py` | Core consumer logic (model filters, whitelist, server polling) |
-| `consumer/qclient.py` | PyQt6 GUI wrapper with system tray support |
+| File                   | Purpose                                                                    |
+| ---------------------- | -------------------------------------------------------------------------- |
+| `consumer/main.py`     | FastAPI application: routing, streaming, OpenAI + Ollama API compatibility |
+| `consumer/consumer.py` | Core consumer logic (model filters, whitelist, server polling)             |
+| `consumer/qclient.py`  | PyQt6 GUI wrapper with system tray support                                 |
 
 ### Features
 
@@ -235,7 +239,7 @@ python-dotenv==1.2.2
 websockets==16.0
 ```
 
-> **Note:** This repository is a partial copy derived from the [2llamashare](https://github.com/mostlygeek/2llamashare) project.
+> **Note:** This repository is a partial copy derived from the 2llamashare project.
 
 ---
 
