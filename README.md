@@ -13,32 +13,31 @@ Think Farm consists of two roles:
 
 ```mermaid
 flowchart TB
-    ClientApps[Client Apps<br/>(OpenAI / Ollama compatible)] -->|HTTP POST| Consumer
+    ClientApps["Client Apps\n(OpenAI / Ollama compatible)"] -->|HTTP POST| Consumer
 
     subgraph Consumer[Consumer]
-        ConsumerAPI[FastAPI Server<br/>localhost:11435]
+        ConsumerAPI["FastAPI Server\nlocalhost:11435"]
         ConsumerAPI -->|Proxy| OpenAIGW[OpenAI API Gateway]
         ConsumerAPI -->|Proxy| OllamaGW[Ollama API Gateway]
         OpenAIGW & OllamaGW --> Streaming[Streaming Response]
     end
 
     subgraph ThinkFarm[Think Farm Network]
-        WS[WebSocket<br/>Job Routing]
+        WS["WebSocket\nJob Routing"]
     end
 
     subgraph Provider[Provider]
         StatusMgmt[Status Management]
         JobHandler[Job Handler]
-        Mgr[Model Manager<br/>VRAM Optimization]
-        Prober[Context Prober<br/>Model Introspection]
+        Mgr["Model Manager\nVRAM Optimization"]
+        Prober["Context Prober\nModel Introspection"]
     end
 
     Consumer <--> WS <--> Provider
 
     Provider -->|Model List / Pull / Delete| OllamaCLI
     Mgr -->|VRAM Calculations| Prober
-    Prober -->|Query| Ollama[Local Ollama Instance
-(localhost:11434)]
+    Prober -->|Query| Ollama["Local Ollama Instance\nlocalhost:11434"]
     Provider -->|Inference| Ollama
 ```
 
