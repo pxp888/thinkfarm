@@ -1,0 +1,81 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.venv/
+venv/
+ENV/
+env.bak/
+venv.bak/
+env.py
+
+
+# Environment variables
+# .env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+# *.env
+
+# React / Node
+node_modules/
+frontend/dist/
+frontend/build/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Vite
+.vite/
+
+# Database
+*.db
+*.sqlite3
+
+# Project specific
+*_id.txt
+provider/gpu_context_limits.json
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+
+workdone.csv
+
+*.pem
+
+.ropeproject/
+
+task-definition.json
+
+*.spec
+sync.sh
+
