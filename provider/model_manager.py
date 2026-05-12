@@ -13,7 +13,8 @@ import context_prober
 # Constants & Paths
 # ---------------------------------------------------------------------------
 _CONFIG_DIR = Path.home() / ".thinkfarm"
-_MANIFEST_FILE = _CONFIG_DIR / "managed_models.json"
+_MANIFEST_NAME_FILE = _CONFIG_DIR / "managed_models_names.json"
+_USER_MODELS_FILE = _CONFIG_DIR / "user_models.json"
 _PFX = "[MODEL-MGMT]"
 
 # Hysteresis: existing models get a boost to prevent rapid swapping.
@@ -25,8 +26,10 @@ class ModelManager:
         self.ollama = ollama_client
         self.server_url = server_url.rstrip("/")
         self.managed_storage_gb = 0
-        self.manifest: Dict[str, dict] = {} # model_name -> info
-        self._load_manifest()
+        self.manifest: Set[str] = set()  # managed model names
+        self.user_models: Set[str] = set()
+        self._load_manifest_names()
+        self._load_user_models()
 
     # Map of GGUF tensor type names → bytes per element
     # Accurate estimates based on GGUF block overheads (bits-per-weight / 8)
@@ -75,14 +78,15 @@ class ModelManager:
 
 
 
-    def _load_manifest(self):
-        if _MANIFEST_FILE.exists():
+    def _load_manifest_names(self):
+        """Load the set of managed model names from disk."""
+        if _MANIFEST_NAME_FILE.exists():
             try:
-                with open(_MANIFEST_FILE, "r") as f:
-                    self.manifest = json.load(f)
+                with open(_MANIFEST_NAME_FILE, "r") as f:
+                    self.manifest = set(json.load(f))
             except Exception as e:
-                print(f"{_PFX} Error loading manifest: {e}")
-                self.manifest = {}
+                print(f"{_PFX} Error loading manifest names: {e}")
+                self.manifest = set()
 
     def _estimate_vram_for_model(self, info: dict) -> int:
         """Walk the tensor list to estimate VRAM needed for this model."""
@@ -112,10 +116,29 @@ class ModelManager:
     def _save_manifest(self):
         _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         try:
-            with open(_MANIFEST_FILE, "w") as f:
-                json.dump(self.manifest, f, indent=2)
+            with open(_MANIFEST_NAME_FILE, "w") as f:
+                json.dump(list(self.manifest), f, indent=2)
         except Exception as e:
-            print(f"{_PFX} Error saving manifest: {e}")
+            print(f"{_PFX} Error saving manifest names: {e}")
+
+    def _load_user_models(self):
+        """Load the set of user-model names from disk."""
+        if _USER_MODELS_FILE.exists():
+            try:
+                with open(_USER_MODELS_FILE, "r") as f:
+                    self.user_models = set(json.load(f))
+            except Exception as e:
+                print(f"{_PFX} Error loading user_models: {e}")
+                self.user_models = set()
+
+    def _save_user_models(self):
+        """Persist the user_models set to disk."""
+        _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(_USER_MODELS_FILE, "w") as f:
+                json.dump(list(self.user_models), f, indent=2)
+        except Exception as e:
+            print(f"{_PFX} Error saving user_models: {e}")
 
     def get_total_vram(self) -> int:
         """Get total VRAM in bytes, supporting NVIDIA and AMD on Linux and Windows.
@@ -241,8 +264,16 @@ class ModelManager:
         if local_tags:
             local_model_names = {m.get("name") for m in local_tags if m.get("name")}
         
-        # User models are those local but NOT in our manifest
-        user_models = local_model_names - set(self.manifest.keys())
+        # User models are those local but NOT in our manifest, plus any previously recorded
+        local_user_models = local_model_names - self.manifest
+        all_user_models = local_user_models | self.user_models
+
+        # Accumulate: never remove from the persistent set
+        new_user_models = local_user_models - self.user_models
+        if new_user_models:
+            self.user_models.update(new_user_models)
+            self._save_user_models()
+            print(f"{_PFX} user_models updated ({len(self.user_models)} total): {sorted(self.user_models)}")
 
         # 1. Hardware Discovery
         total_vram = self.get_total_vram()
@@ -257,7 +288,7 @@ class ModelManager:
         candidates = []
         for item in demand:
             model = item["model"]
-            if model in user_models:
+            if model in all_user_models:
                 continue
 
             revenue = item["revenue"]
@@ -308,8 +339,8 @@ class ModelManager:
         for name, c in target_managed_models.items():
             plan_lines.append(f"{_PFX}     - {name} ({c['opportunity']:.2f} opp, {c['size_bytes'] / (1024**3):.2f} GB)")
         # Deletions & additions
-        to_remove = [m for m in self.manifest if m not in target_managed_models]
-        to_add = [m for m in target_managed_models if m not in self.manifest]
+        to_remove = self.manifest - set(target_managed_models.keys()) - self.user_models
+        to_add = set(target_managed_models.keys()) - self.manifest
         # Models already on disk won't need pulling (user_models already excluded them)
         for model in to_remove:
             plan_lines.append(f"{_PFX}   ❌ REMOVE: {model}")
@@ -332,7 +363,7 @@ class ModelManager:
             print(f"{_PFX} Removing managed model: {model}")
             success = await self.ollama.delete_model(model)
             if success:
-                del self.manifest[model]
+                self.manifest.discard(model)
                 self._save_manifest()
 
         for model in to_add:
@@ -345,7 +376,7 @@ class ModelManager:
             try:
                 async for _ in self.ollama.pull_model(model):
                     pass
-                self.manifest[model] = target_managed_models[model]["info"]
+                self.manifest.add(model)
                 self._save_manifest()
                 newly_pulled.append(model)
                 print(f"{_PFX} Successfully pulled {model}")
@@ -354,5 +385,10 @@ class ModelManager:
 
         return newly_pulled
 
-    async def get_managed_models_list(self) -> List[str]:
-        return list(self.manifest.keys())
+    async def get_managed_models_set(self) -> Set[str]:
+        """Return the set of managed model names."""
+        return self.manifest
+
+    async def get_user_models_list(self) -> List[str]:
+        """Return the names of all models identified as user-owned."""
+        return sorted(self.user_models)
