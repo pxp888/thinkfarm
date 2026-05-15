@@ -120,17 +120,38 @@ async def _get_model_info(base_url: str, model_name: str) -> tuple[int, bool, bo
         parent = (info.get("details", {}) or {}).get("parent_model", "")
         is_eligible = not (remote_host or remote_model or parent)
 
-        # Detect embedding-only models: they have no chat/generate template.
+        # Detect embedding-only models: they have no chat/generate template,
+        # or they explicitly list 'embedding' in capabilities, or use a known architecture.
         template = info.get("template", "").strip()
-        is_embed = template == ""
+        details = info.get("details") or {}
+        families = details.get("families") or []
+        capabilities = info.get("capabilities") or []
+        model_info = info.get("model_info") or {}
+        arch = str(model_info.get("general.architecture", "")).lower()
+        
+        is_embed = (
+            template == "" or 
+            "embedding" in capabilities or 
+            any(f in ["bert", "nomic-bert"] for f in families) or
+            "bert" in arch
+        )
 
-        # num_ctx_train lives inside model_info
+        # num_ctx_train lives inside model_info. Keys vary by architecture (llama, qwen, bert etc).
         ctx = (
-            info.get("model_info", {}).get("llama.context_length")
-            or info.get("model_info", {}).get("general.context_length")
-            or info.get("parameters", {}).get("num_ctx_train")
+            model_info.get("llama.context_length")
+            or model_info.get("general.context_length")
+            or next((v for k, v in model_info.items() if k.endswith(".context_length")), None)
             or _DEFAULT_MAX_CTX
         )
+        # Attempt to find num_ctx in Modelfile parameters if not in model_info
+        if ctx == _DEFAULT_MAX_CTX and "parameters" in info and isinstance(info["parameters"], str):
+            for line in info["parameters"].splitlines():
+                if line.strip().startswith("num_ctx"):
+                    try:
+                        ctx = int(line.split()[-1])
+                        break
+                    except:
+                        pass
         ctx = int(ctx)
 
         model_type = "embedding" if is_embed else "generative"
@@ -402,22 +423,28 @@ async def _probe_new_models(
         else:
             print(f"{_PFX}  Model type: GENERATIVE - will probe via /api/generate")
 
-        best_ctx = await _find_max_gpu_ctx(
-            base_url, model_name, upper_bound=upper_bound, is_embed=is_embed
-        )
-
-        if best_ctx is None:
-            print(
-                f"{_PFX}  RESULT: Could not run {model_name} on GPU even at "
-                f"{_MIN_CTX:,} tokens. Storing 0 (GPU unavailable)."
-            )
-            limits[model_name] = 0
+        if is_embed:
+            # Embedding models are always "safe" even if they spill to CPU, 
+            # as they don't have the same context/OOM risks as generative models.
+            print(f"{_PFX}  RESULT: {model_name} is an embedding model. Storing -1 (N/A).")
+            limits[model_name] = -1
         else:
-            print(
-                f"{_PFX}  RESULT: Max GPU-safe context for {model_name} "
-                f"= {best_ctx:,} tokens [OK]"
+            best_ctx = await _find_max_gpu_ctx(
+                base_url, model_name, upper_bound=upper_bound, is_embed=False
             )
-            limits[model_name] = best_ctx
+
+            if best_ctx is None:
+                print(
+                    f"{_PFX}  RESULT: Could not run {model_name} on GPU even at "
+                    f"{_MIN_CTX:,} tokens. Storing 0 (GPU unavailable)."
+                )
+                limits[model_name] = 0
+            else:
+                print(
+                    f"{_PFX}  RESULT: Max GPU-safe context for {model_name} "
+                    f"= {best_ctx:,} tokens [OK]"
+                )
+                limits[model_name] = best_ctx
 
         # Persist after each model in case of crash
         save_context_limits(limits)
@@ -500,6 +527,7 @@ async def _run_cli_probe(base_url: str, force: bool = False):
     if force:
         print(f"{_PFX} --force given - clearing {len(limits)} cached limits.")
         save_context_limits({})
+        limits = {}
 
     # Fetch all models from Ollama
     print(f"{_PFX} Fetching model list from {base_url}/api/tags...")

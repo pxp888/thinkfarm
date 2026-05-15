@@ -172,6 +172,80 @@ async def get_ps():
 # Inference endpoints – streaming passthrough
 # ---------------------------------------------------------------------------
 
+def _add_num_ctx_if_missing(body: dict) -> dict:
+    """
+    Check if num_ctx is present in the request options.
+    If missing or empty, estimate a safe default based on request content.
+    """
+    if not isinstance(body, dict):
+        return body
+
+    options = body.get("options")
+    if not isinstance(options, dict):
+        options = {}
+    
+    num_ctx = options.get("num_ctx")
+    
+    # If num_ctx is present and > 0, we don't touch it.
+    if isinstance(num_ctx, int) and num_ctx > 0:
+        return body
+
+    # Collect text to estimate length
+    text_parts = []
+    
+    # 1. Generate/Embeddings prompt
+    prompt = body.get("prompt")
+    if isinstance(prompt, str):
+        text_parts.append(prompt)
+    elif isinstance(prompt, list):
+        for p in prompt:
+            if isinstance(p, str):
+                text_parts.append(p)
+                
+    # 2. Chat messages
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for msg in messages:
+            if isinstance(msg, dict):
+                content = msg.get("content")
+                if isinstance(content, str):
+                    text_parts.append(content)
+                elif isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            text_parts.append(item.get("text", ""))
+
+    if not text_parts:
+        return body
+
+    full_text = "".join(text_parts)
+    
+    # Estimate tokens: 1 token ~= 3 characters (conservative)
+    estimated_prompt_tokens = len(full_text) // 3
+    
+    # Buffer for response
+    response_buffer = 2048
+    if isinstance(options.get("num_predict"), int) and options["num_predict"] > 0:
+        response_buffer = options["num_predict"]
+    elif isinstance(body.get("max_tokens"), int) and body["max_tokens"] > 0:
+        response_buffer = body["max_tokens"]
+        
+    required_ctx = estimated_prompt_tokens + response_buffer
+    
+    # Clamp floor and round
+    if required_ctx < 4096:
+        final_ctx = 4096
+    else:
+        # Round up to nearest 1024
+        final_ctx = ((required_ctx + 1023) // 1024) * 1024
+        
+    if "options" not in body or not isinstance(body["options"], dict):
+        body["options"] = {}
+    body["options"]["num_ctx"] = final_ctx
+    
+    return body
+
+
 async def _stream_to_server(request: Request, endpoint: str) -> StreamingResponse:
     """
     Forward an inference request to the central server and stream the
@@ -186,6 +260,17 @@ async def _stream_to_server(request: Request, endpoint: str) -> StreamingRespons
         raise HTTPException(status_code=500, detail="Consumer ID not loaded")
     
     body_bytes = await request.body()
+    
+    # Estimate num_ctx if missing (skip for 'show' info requests)
+    if endpoint != "show":
+        try:
+            body = json.loads(body_bytes)
+            body = _add_num_ctx_if_missing(body)
+            body_bytes = json.dumps(body).encode("utf-8")
+        except Exception:
+            # If parsing fails, just proceed with original body_bytes
+            pass
+
     url = f"{SERVER_URL}/{endpoint if endpoint.startswith('v1') else 'api/' + endpoint}"
 
     client = httpx.AsyncClient(timeout=None)

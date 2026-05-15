@@ -129,12 +129,12 @@ class ProviderGUI(ctk.CTk):
         self.configure(fg_color="#f5f5f7")
 
         # Sidebar - Pure Black
-        self.sidebar_frame = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color="#2d2d2d", border_width=0)
+        self.sidebar_frame = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color="#e6e6e6", border_width=0)
         self.sidebar_frame.grid(row=0, column=0, rowspan=2, sticky="nsew")
         self.sidebar_frame.grid_rowconfigure(5, weight=1)
 
         self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="thinkfarm",
-                                       text_color="#e6e6e6",
+                                       text_color="black",
                                        font=ctk.CTkFont(family=ui_font[0], size=24, weight="normal"))
         self.logo_label.grid(row=0, column=0, padx=25, pady=(40, 40))
 
@@ -151,7 +151,7 @@ class ProviderGUI(ctk.CTk):
         self.stop_btn.grid(row=2, column=0, padx=25, pady=10, sticky="ew")
 
         # Version/Info at bottom of sidebar
-        self.info_label = ctk.CTkLabel(self.sidebar_frame, text="Provider v6",
+        self.info_label = ctk.CTkLabel(self.sidebar_frame, text="Provider v7",
                                        text_color="#666666",
                                        font=ctk.CTkFont(family=ui_font[0], size=11))
         self.info_label.grid(row=6, column=0, padx=20, pady=20)
@@ -214,7 +214,7 @@ class ProviderGUI(ctk.CTk):
         self.storage_entry.grid(row=4, column=1, padx=(0, 30), pady=(0, 30), sticky="ew")
 
         self.save_btn = ctk.CTkButton(self.main_frame, text="Save Settings", width=160, height=40, corner_radius=8,
-                                      command=self.save_config, fg_color="#FF7F7F", hover_color="#FF5F5F",
+                                      command=self.save_config, fg_color="#8e8e93", hover_color="#636366",
                                       text_color="#FFFFFF",
                                       font=ctk.CTkFont(family=ui_font[0], size=14, weight="bold"))
         self.save_btn.grid(row=1, column=0, sticky="e")

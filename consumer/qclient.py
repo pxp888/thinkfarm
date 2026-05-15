@@ -132,7 +132,7 @@ class QConsumerGUI(QMainWindow):
         # Sidebar - Pure Black
         self.sidebar_frame = QFrame()
         self.sidebar_frame.setFixedWidth(240)
-        self.sidebar_frame.setStyleSheet("background-color: #2d2d2d; border: none;")
+        self.sidebar_frame.setStyleSheet("background-color: #e6e6e6; border: none;")
         sidebar_layout = QVBoxLayout(self.sidebar_frame)
         sidebar_layout.setContentsMargins(25, 40, 25, 20)
         sidebar_layout.setSpacing(10)
@@ -202,7 +202,7 @@ class QConsumerGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Client v4")
+        self.info_label = QLabel("Client v7")
         self.info_label.setStyleSheet("color: #666666; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -356,14 +356,14 @@ class QConsumerGUI(QMainWindow):
         self.save_all_btn.setFixedSize(160, 40)
         self.save_all_btn.setStyleSheet("""
             QPushButton {
-                background-color: #FF7F7F;
+                background-color: #8e8e93;
                 color: white;
                 border-radius: 8px;
                 font-weight: bold;
                 font-size: 14px;
                 border: none;
             }
-            QPushButton:hover { background-color: #FF5F5F; }
+            QPushButton:hover { background-color: #636366; }
         """)
         self.save_all_btn.clicked.connect(self.save_all_settings)
         save_btn_layout.addWidget(self.save_all_btn)

@@ -104,11 +104,11 @@ def _context_fits(model: str, job_body: dict) -> bool:
     Return True if this provider can handle the job's requested context length.
     """
     limit = gpu_context_limits.get(model)
-    if limit is None:
+    if limit is None or limit == -1:
         return True
     if limit == 0:
-        print(f"Context check: {model} has limit=0 - optimistic accept.")
-        return True
+        print(f"Context check: {model} has limit=0 — declining.")
+        return False
 
     requested = (
         job_body.get("options", {}).get("num_ctx")
@@ -174,11 +174,25 @@ async def connect_to_server():
             _ws_ref = None
 
 
+def _filter_by_gpu_limit(models: list) -> list:
+    """Filter out models that have a GPU context limit of 0."""
+    filtered = []
+    for m in models:
+        name = m.get("name") if isinstance(m, dict) else m
+        if gpu_context_limits.get(name) != 0:
+            filtered.append(m)
+    return filtered
+
+
 async def get_provider_status():
     status = await ollama.get_models()
     loaded_list = await ollama.get_loaded_models()
     if status is None or loaded_list is None:
         return None
+
+    status = _filter_by_gpu_limit(status)
+    loaded_list = _filter_by_gpu_limit(loaded_list)
+
     return {
         "provider_id": PROVIDER_ID,
         "connected_at": datetime.now().isoformat(),
@@ -193,6 +207,9 @@ async def get_loaded_models_only():
     loaded_list = await ollama.get_loaded_models()
     if loaded_list is None:
         return None
+
+    loaded_list = _filter_by_gpu_limit(loaded_list)
+
     return {
         "provider_id": PROVIDER_ID,
         "connected_at": datetime.now().isoformat(),
