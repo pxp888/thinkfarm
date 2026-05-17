@@ -7,6 +7,7 @@ Configuration loaded from ~/.thinkfarm/config.ini.
 
 import asyncio
 import configparser
+import uuid
 import multiprocessing
 import os
 import signal
@@ -37,8 +38,10 @@ def _load_config():
     config = configparser.ConfigParser()
     config.read(_CONFIG_PATH)
 
-    # Priority: Config File > Environment Variable > Default
-    provider_id = os.environ.get("PROVIDER_ID", "")
+    # Priority: Config File > Environment Variable > System ID > Default
+    provider_id = os.environ.get("PROVIDER_ID", "") or \
+                  (config.get("provider", "provider_id", fallback=None) if config.has_section("provider") else None) or \
+                  str(uuid.uuid4())
     ollama_url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
     managed_storage_gb = os.environ.get("MANAGED_STORAGE_GB", "30")
     auto_manage_str = os.environ.get("AUTO_MANAGE", "False").lower()
