@@ -92,6 +92,11 @@ gpu_context_limits: dict = {}
 _previous_status = None
 _cached_full_models = []                # Original list of dicts from Ollama /api/tags
 
+# Heartbeat: track the last model used and activity time for Ollama keep-alive
+_last_model: str = ""
+_heartbeat_task: asyncio.Task | None = None
+_last_activity_time: float = 0.0
+
 # Reference to the live WebSocket so execute_job can send chunks
 _ws_ref = None
 
@@ -334,7 +339,7 @@ async def handle_server_message(websocket, data: dict):
     if msg_type == "job_published":
         await handle_job_published(websocket, data)
     elif msg_type == "job_assigned":
-        asyncio.create_task(execute_job(websocket, data))
+        asyncio.create_task(execute_job_with_heartbeat_reset(websocket, data))
 
 
 async def handle_job_published(websocket, data: dict):
@@ -481,6 +486,48 @@ async def execute_job(websocket, data: dict):
         is_busy -= 1
 
 
+async def execute_job_with_heartbeat_reset(websocket, data: dict):
+    """Wrapper that resets the heartbeat timer before executing a job."""
+    global _last_activity_time, _last_model
+    _last_activity_time = asyncio.get_event_loop().time()
+
+    # If this is a chat/generate job, remember the model
+    body = data.get("body", {})
+    model = body.get("model", "")
+    if model:
+        _last_model = model
+
+    try:
+        await execute_job(websocket, data)
+    finally:
+        # Mark completion time so heartbeat waits another full interval
+        _last_activity_time = asyncio.get_event_loop().time()
+
+
+async def _heartbeat_loop():
+    """Periodically send a minimal request to Ollama to keep it warm."""
+    heartbeat_interval = 1200  # 20 minutes in seconds
+    while True:
+        await asyncio.sleep(60)  # check every minute
+        elapsed = asyncio.get_event_loop().time() - _last_activity_time
+        if elapsed >= heartbeat_interval and not stopping and is_busy == 0:
+            model = _last_model
+            if not model:
+                print("[HEARTBEAT] No model available yet – skipping.")
+                continue
+            try:
+                # Use generate endpoint with a minimal prompt
+                result = await ollama.generate(model, "hello", stream=False)
+                if result is not None:
+                    print(f"[HEARTBEAT] Kept {model} alive.")
+                else:
+                    print(f"[HEARTBEAT] Heartbeat failed for {model}.")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[HEARTBEAT] Heartbeat error for {model}: {e}")
+
+
 async def _try_accept_job(websocket, data: dict):
     model = data.get("model", "")
     job_id = data.get("job_id")
@@ -525,6 +572,14 @@ async def main():
 
     # Start the WebSocket connection loop
     asyncio.create_task(connect_to_server())
+
+    # Set initial activity time so the first heartbeat fires correctly
+    global _last_activity_time
+    _last_activity_time = asyncio.get_event_loop().time()
+
+    # Start the background heartbeat task
+    global _heartbeat_task
+    _heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
     # Setup signal handlers for graceful shutdown
     shutdown_event = asyncio.Event()
