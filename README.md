@@ -87,40 +87,84 @@ pip install -r requirements.txt
 
 ### Provider Setup
 
-The Provider exposes your local Ollama models to the Think Farm network.
+The Provider exposes your local Ollama models to the Think Farm network. There are three ways to run it, each targeting a different deployment scenario:
+
+#### 1. Linux — Base Provider (`baseprovider.py`)
+
+The base provider connects to an **existing external Ollama instance** (e.g., already running on `localhost:11434`). This is the recommended option for Linux servers and desktops where Ollama is already installed and managed.
 
 ```bash
-# Headless / CLI mode
-python -m provider.headless start
-
-# Check status
-python -m provider.headless status
-
-# Stop
-python -m provider.headless stop
+python -m provider.baseprovider
 ```
 
-Or use the GUI:
+**Key config (in `~/.thinkfarm/config.ini`):**
+- `ollama_url` — URL of your external Ollama instance
+- `provider_id`, `managed_storage_gb`, `auto_manage` — same as below
+
+No additional Ollama setup needed — it uses whatever Ollama is already running.
+
+#### 2. Windows — Provider (`provider.py`)
+
+The Windows provider **manages its own internal Ollama server** automatically — it starts and stops a dedicated Ollama instance on a random port and handles model storage separately. Use this on Windows or any system where you want Think Farm to fully manage Ollama.
 
 ```bash
 python -m provider.provider
 ```
 
-The Provider manages:
+**Key config (in `~/.thinkfarm/config.ini`):**
+- `ollama_models_path` — Optional custom path for Ollama model storage (e.g., `D:\Ollama\Models`)
+- `provider_id`, `managed_storage_gb`, `auto_manage` — same as below
 
-- **Model lifecycle** - automatically pulls, loads, and unloads models based on demand and VRAM constraints.
-- **Context probing** - introspects each model's context window and prefill limits via Ollama.
-- **VRAM optimization** - maintains a model portfolio that fits within available GPU memory.
+> **Note:** The Ollama URL is no longer configured manually — the provider starts its own instance internally.
+
+#### 3. Headless — CLI for Servers (`headless.py`)
+
+No GUI at all — a headless mode designed for **headless servers, Docker containers, or systemd services** where terminal interaction is preferred.
+
+```bash
+# Start the provider in the foreground
+python -m provider.headless start
+
+# Check status
+python -m provider.headless status
+
+# Stop the provider
+python -m provider.headless stop
+```
+
+Or use it with systemd:
+```ini
+[Service]
+ExecStart=python -m provider.headless start
+PIDFile=~/.thinkfarm/provider.pid
+Restart=on-failure
+```
+
+| Config option | Purpose |
+|---|---|
+| `ollama_url` | URL of the external Ollama instance to connect to |
+| `provider_id` | Unique identifier for this provider node |
+| `managed_storage_gb` | Maximum disk storage for models (default: 30) |
+| `auto_manage` | Whether to automatically pull/unload models (true/false) |
+
+All three modes share these common features:
+
+- **Model lifecycle** — automatically pulls, loads, and unloads models based on demand and VRAM constraints.
+- **Context probing** — introspects each model's context window and prefill limits via Ollama.
+- **VRAM optimization** — maintains a model portfolio that fits within available GPU memory.
 
 ### Consumer Setup
 
 The Consumer presents available remote models as a local server compatible with Ollama's API and the OpenAI API format.
 
 ```bash
-# GUI mode (recommended)
+# PyQt6 GUI (recommended)
+python -m consumer.qclient
+
+# Legacy Tkinter GUI (deprecated)
 python -m consumer.consumer
 
-# Or launch directly
+# FastAPI server only (no GUI)
 python -m consumer.main
 ```
 
@@ -207,8 +251,8 @@ The Provider uses a three-tier model management system:
 | File                   | Purpose                                                                    |
 | ---------------------- | -------------------------------------------------------------------------- |
 | `consumer/main.py`     | FastAPI application: routing, streaming, OpenAI + Ollama API compatibility |
-| `consumer/consumer.py` | Core consumer logic (model filters, whitelist, server polling)             |
-| `consumer/qclient.py`  | PyQt6 GUI wrapper with system tray support                                 |
+| `consumer/consumer.py` | **Legacy** — Core Tkinter GUI (deprecated; use `qclient.py`)                |
+| `consumer/qclient.py`  | **Primary** — PyQt6 GUI wrapper with system tray and cross-platform support  |
 
 ### Features
 
