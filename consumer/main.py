@@ -62,7 +62,11 @@ async def lifespan(app: FastAPI):
         # For now, we'll allow it but health check/inference will fail.
         app.state.consumer_id = None
 
+    app.state.http_client = httpx.AsyncClient(timeout=None)
+    
     yield
+    
+    await app.state.http_client.aclose()
 
 # Initial load for module-level variables
 load_config()
@@ -89,15 +93,15 @@ async def health(request: Request):
 
 @app.get("/version")
 @app.get("/api/version")
-async def version():
+async def version(request: Request):
     """Return Ollama-compatible version from the central server."""
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(f"{SERVER_URL}/api/version")
-            response.raise_for_status()
-            return response.json()
-        except Exception:
-            return {"version": "0.18.0"}
+    client = request.app.state.http_client
+    try:
+        response = await client.get(f"{SERVER_URL}/api/version")
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return {"version": "0.18.0"}
 
 
 # ---------------------------------------------------------------------------
@@ -125,47 +129,47 @@ def get_whitelist_settings():
 
 
 @app.get("/api/tags")
-async def get_tags():
+async def get_tags(request: Request):
     """Return list of all available models from the central server."""
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(f"{SERVER_URL}/api/tags")
-            response.raise_for_status()
-            data = response.json()
-            
-            enabled, whitelist = get_whitelist_settings()
-            if enabled and whitelist:
-                filtered_models = [
-                    m for m in data.get("models", [])
-                    if (m.get("name") if isinstance(m, dict) else m) in whitelist
-                ]
-                data["models"] = filtered_models
-            
-            return data
-        except Exception:
-            return {"models": []}
+    client = request.app.state.http_client
+    try:
+        response = await client.get(f"{SERVER_URL}/api/tags")
+        response.raise_for_status()
+        data = response.json()
+        
+        enabled, whitelist = get_whitelist_settings()
+        if enabled and whitelist:
+            filtered_models = [
+                m for m in data.get("models", [])
+                if (m.get("name") if isinstance(m, dict) else m) in whitelist
+            ]
+            data["models"] = filtered_models
+        
+        return data
+    except Exception:
+        return {"models": []}
 
 
 @app.get("/api/ps")
-async def get_ps():
+async def get_ps(request: Request):
     """Return list of loaded models from the central server."""
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(f"{SERVER_URL}/api/ps")
-            response.raise_for_status()
-            data = response.json()
+    client = request.app.state.http_client
+    try:
+        response = await client.get(f"{SERVER_URL}/api/ps")
+        response.raise_for_status()
+        data = response.json()
+        
+        enabled, whitelist = get_whitelist_settings()
+        if enabled and whitelist:
+            filtered_models = [
+                m for m in data.get("models", [])
+                if (m.get("name") if isinstance(m, dict) else m) in whitelist
+            ]
+            data["models"] = filtered_models
             
-            enabled, whitelist = get_whitelist_settings()
-            if enabled and whitelist:
-                filtered_models = [
-                    m for m in data.get("models", [])
-                    if (m.get("name") if isinstance(m, dict) else m) in whitelist
-                ]
-                data["models"] = filtered_models
-                
-            return data
-        except Exception:
-            return {"models": []}
+        return data
+    except Exception:
+        return {"models": []}
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +277,7 @@ async def _stream_to_server(request: Request, endpoint: str) -> StreamingRespons
 
     url = f"{SERVER_URL}/{endpoint if endpoint.startswith('v1') else 'api/' + endpoint}"
 
-    client = httpx.AsyncClient(timeout=None)
+    client = request.app.state.http_client
     try:
         # We use a context manager for the request to ensure we can read headers first
         req = client.build_request(
@@ -291,7 +295,6 @@ async def _stream_to_server(request: Request, endpoint: str) -> StreamingRespons
             # If server returned an error, read it and raise
             error_detail = await response.aread()
             await response.aclose()
-            await client.aclose()
             try:
                 detail = error_detail.decode()
                 # Try to parse as JSON if possible
@@ -309,7 +312,6 @@ async def _stream_to_server(request: Request, endpoint: str) -> StreamingRespons
                     yield chunk
             finally:
                 await response.aclose()
-                await client.aclose()
 
         return StreamingResponse(
             generate(),
@@ -318,7 +320,6 @@ async def _stream_to_server(request: Request, endpoint: str) -> StreamingRespons
         )
     except Exception as e:
         if not isinstance(e, HTTPException):
-            await client.aclose()
             raise HTTPException(status_code=500, detail=str(e))
         raise e
 
@@ -376,22 +377,22 @@ async def openai_responses(request: Request):
 
 
 @app.get("/v1/models")
-async def openai_models():
+async def openai_models(request: Request):
     """Return list of models in OpenAI-compatible format."""
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(f"{SERVER_URL}/v1/models")
-            response.raise_for_status()
-            data = response.json()
+    client = request.app.state.http_client
+    try:
+        response = await client.get(f"{SERVER_URL}/v1/models")
+        response.raise_for_status()
+        data = response.json()
+        
+        enabled, whitelist = get_whitelist_settings()
+        if enabled and whitelist:
+            filtered_data = [
+                m for m in data.get("data", [])
+                if m.get("id") in whitelist
+            ]
+            data["data"] = filtered_data
             
-            enabled, whitelist = get_whitelist_settings()
-            if enabled and whitelist:
-                filtered_data = [
-                    m for m in data.get("data", [])
-                    if m.get("id") in whitelist
-                ]
-                data["data"] = filtered_data
-                
-            return data
-        except Exception:
-            return {"object": "list", "data": []}
+        return data
+    except Exception:
+        return {"object": "list", "data": []}
