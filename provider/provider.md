@@ -59,7 +59,7 @@ sequenceDiagram
 
 ## 2. The "Smart Race" (Job Acceptance)
 
-When `job_published` arrives, the provider uses a **tiered delay** system. A busy provider waits longer; a cold model waits a bit; a warm model accepts instantly. After the delay, the provider checks if the model is still available (it may have been evicted during the wait).
+When `job_published` arrives, the provider uses a **tiered delay** system. A cold model waits a bit; a warm model accepts instantly. After the delay, the provider checks if the model is still available (it may have been evicted during the wait).
 
 ```mermaid
 sequenceDiagram
@@ -73,16 +73,11 @@ sequenceDiagram
     Note right of P: 1. Model in my_models?+2. Does num_ctx fit GPU?
     
     alt Eligible
-        P->>P: Is busy (is_busy > 0)?
-        alt Yes - Busy (penalty delay)
-            P->>P: Delay: 1.5s (let idle providers go first)
-        else No - Idle (check model warmth)
-            P->>O: Get loaded_models
-            alt Model not in VRAM
-                P->>P: Delay: 0.5s (cold start penalty)
-            else Model already warm
-                P->>P: Delay: 0s (instant accept)
-            end
+        P->>O: Get loaded_models
+        alt Model not in VRAM
+            P->>P: Delay: 0.5s (cold start penalty)
+        else Model already warm
+            P->>P: Delay: 0s (instant accept)
         end
         
         P->>P: Sleep(delay)
@@ -173,7 +168,7 @@ The provider sends updates via `_get_changed_loaded_status()`, which checks if `
 The `_previous_status` object tracks `models`, `loaded_models`, and `is_busy` as frozensets for change detection.
 
 ### Concurrency Control
-- **`is_busy`**: An integer counter of active or queued jobs. Used to signal state to the server and calculate "Smart Race" delays.
+- **`is_busy`**: An integer counter of active or queued jobs. Used to signal state to the server.
 - **`execution_lock`**: A global `asyncio.Lock` that serializes the actual hitting of the Ollama API, preventing multiple heavy inference tasks from competing for the same GPU.
 
 ---

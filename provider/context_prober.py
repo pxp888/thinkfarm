@@ -114,11 +114,14 @@ async def _get_model_info(base_url: str, model_name: str) -> tuple[int, bool, bo
         if not isinstance(info, dict):
             raise ValueError(f"/api/show returned non-dict: {info!r}")
 
-        # Eligibility check: skip cloud and custom models
+        # Eligibility check: skip cloud and custom models.
+        # Allow official models that use internal blob paths/digests in parent_model.
         remote_host = info.get("remote_host")
         remote_model = info.get("remote_model")
         parent = (info.get("details", {}) or {}).get("parent_model", "")
-        is_eligible = not (remote_host or remote_model or parent)
+        is_eligible = not (remote_host or remote_model)
+        if parent and not (parent.startswith("/") or "sha256" in parent):
+            is_eligible = False
 
         # Detect embedding-only models: they have no chat/generate template,
         # or they explicitly list 'embedding' in capabilities, or use a known architecture.

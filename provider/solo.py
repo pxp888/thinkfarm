@@ -352,13 +352,10 @@ async def handle_job_published(websocket, data: dict):
     if not _context_fits(model, body):
         return
 
-    if is_busy > 0:
-        await asyncio.sleep(1.5)
-    else:
-        loaded = await ollama.get_loaded_models()
-        loaded_names = {m.get("name") if isinstance(m, dict) else m for m in loaded}
-        if model not in loaded_names:
-            await asyncio.sleep(0.5)
+    loaded = await ollama.get_loaded_models()
+    loaded_names = {m.get("name") if isinstance(m, dict) else m for m in loaded}
+    if model not in loaded_names:
+        await asyncio.sleep(0.5)
 
     if model not in my_models:
         return

@@ -65,9 +65,10 @@ class OllamaClient:
                         continue
 
                     # parent_model is empty for official/base models;
-                    # non-empty means it was created/fine-tuned from another model
+                    # non-empty means it was created/fine-tuned from another model.
+                    # Some official models (e.g. vision) point to internal blobs.
                     parent = (info.get("details", {}) or {}).get("parent_model", "")
-                    if parent:
+                    if parent and not (parent.startswith("/") or "sha256" in parent):
                         print(f"[OllamaClient] Skipping custom model (parent: {parent}): {name}")
                         continue
                     filtered.append(model)

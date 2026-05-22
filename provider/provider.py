@@ -47,12 +47,10 @@ class ProviderGUI(ctk.CTk):
 
         self._server_process = None
         self._stop_event = threading.Event()
+        self._ollama_process = None
+        self._ollama_log_file = None
 
-        # Start child Ollama instance on a random port
-        port = self._get_free_port()
-        self._ollama_url = f"http://127.0.0.1:{port}"
-        os.environ["OLLAMA_URL"] = self._ollama_url
-        
+        # Determine Ollama server URL & restart/start internal server
         self.restart_ollama_server()
 
         # Initialize managed model state
@@ -65,38 +63,107 @@ class ProviderGUI(ctk.CTk):
         self._load_config()
 
     def restart_ollama_server(self):
-        print("[MGMT] Restarting internal ollama server...")
+        print("[MGMT] Restarting/checking internal ollama server...")
+        
+        # Terminate existing child process if running
         if hasattr(self, '_ollama_process') and self._ollama_process is not None:
             try:
                 self._ollama_process.terminate()
                 self._ollama_process.wait(timeout=5)
             except Exception as e:
                 print(f"[MGMT] Error terminating old ollama process: {e}")
+            self._ollama_process = None
+            
+        if hasattr(self, '_ollama_log_file') and self._ollama_log_file is not None:
+            try:
+                self._ollama_log_file.close()
+            except Exception:
+                pass
+            self._ollama_log_file = None
                 
-        env = os.environ.copy()
-        port = self._ollama_url.split(":")[-1]
-        env["OLLAMA_HOST"] = f"127.0.0.1:{port}"
-        
+        # Read config to see if custom models path is configured
+        models_path = ""
         config = configparser.ConfigParser()
         if os.path.exists(_CONFIG_PATH):
             config.read(_CONFIG_PATH)
             if config.has_section("provider") and config.has_option("provider", "ollama_models_path"):
                 models_path = config.get("provider", "ollama_models_path").strip()
-                if models_path:
-                    env["OLLAMA_MODELS"] = models_path
+
+        # We need a child Ollama server. Ensure url is set to a non-11434 port.
+        if not hasattr(self, '_ollama_url') or "11434" in self._ollama_url:
+            port = self._get_free_port()
+            self._ollama_url = f"http://127.0.0.1:{port}"
+            
+        print(f"[MGMT] Starting child Ollama server on port {self._ollama_url.split(':')[-1]}...")
         
+        # Prepare environment
+        env = os.environ.copy()
+        port = self._ollama_url.split(":")[-1]
+        env["OLLAMA_HOST"] = f"127.0.0.1:{port}"
+        env["OLLAMA_DEBUG"] = "1"
+        if models_path:
+            env["OLLAMA_MODELS"] = models_path
+
+        if os.name == 'nt':
+            # Ensure critical Windows environment variables are present
+            system_root = env.get("SystemRoot") or env.get("SYSTEMROOT") or "C:\\Windows"
+            env["SystemRoot"] = system_root
+            if "SystemDrive" not in env and "SYSTEMDRIVE" not in env:
+                env["SystemDrive"] = "C:"
+            
+            # Find the Path variable (case-insensitive search)
+            path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
+            current_path = env.get(path_key, "")
+            paths = current_path.split(os.pathsep) if current_path else []
+            
+            # Ensure System32 is in PATH
+            sys32 = os.path.join(system_root, "System32")
+            if sys32 not in paths:
+                paths.append(sys32)
+                
+            # Ensure default Ollama installation folder is in PATH
+            user_profile = env.get("USERPROFILE") or os.path.expanduser("~")
+            ollama_default_path = os.path.join(user_profile, "AppData", "Local", "Programs", "Ollama")
+            if ollama_default_path not in paths:
+                paths.append(ollama_default_path)
+                
+            env[path_key] = os.pathsep.join(paths)
+
         creationflags = 0
         if os.name == 'nt':
             creationflags = subprocess.CREATE_NO_WINDOW
             
+        # Log output to a file for troubleshooting
+        log_dir = os.path.expanduser("~/.thinkfarm")
+        os.makedirs(log_dir, exist_ok=True)
+        try:
+            self._ollama_log_file = open(os.path.join(log_dir, "ollama_internal.log"), "a", encoding="utf-8")
+            stdout_target = self._ollama_log_file
+            stderr_target = self._ollama_log_file
+        except Exception as e:
+            print(f"[MGMT] Warning: could not open internal Ollama log file: {e}")
+            stdout_target = subprocess.DEVNULL
+            stderr_target = subprocess.DEVNULL
+
         self._ollama_process = subprocess.Popen(
             ["ollama", "serve"],
             env=env,
             creationflags=creationflags,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stdout=stdout_target,
+            stderr=stderr_target
         )
+
+        os.environ["OLLAMA_URL"] = self._ollama_url
+        if hasattr(self, 'ollama') and self.ollama is not None:
+            self.ollama.base_url = self._ollama_url
+            import httpx
+            # Close old client if possible
+            try:
+                asyncio.run(self.ollama.close())
+            except Exception:
+                pass
+            self.ollama.httpx_client = httpx.AsyncClient(base_url=self._ollama_url, timeout=30.0)
 
     def _load_config(self):
         if not os.path.exists(_CONFIG_PATH):
@@ -210,7 +277,7 @@ class ProviderGUI(ctk.CTk):
         self.stop_btn.grid(row=2, column=0, padx=25, pady=10, sticky="ew")
 
         # Version/Info at bottom of sidebar
-        self.info_label = ctk.CTkLabel(self.sidebar_frame, text="Provider v8",
+        self.info_label = ctk.CTkLabel(self.sidebar_frame, text="Provider v10",
                                        text_color="#666666",
                                        font=ctk.CTkFont(family=ui_font[0], size=11))
         self.info_label.grid(row=6, column=0, padx=20, pady=20)
@@ -457,6 +524,12 @@ class ProviderGUI(ctk.CTk):
                 self._ollama_process.wait(timeout=5)
             except Exception as e:
                 print(f"Error terminating ollama process: {e}")
+                
+        if hasattr(self, '_ollama_log_file') and self._ollama_log_file is not None:
+            try:
+                self._ollama_log_file.close()
+            except Exception:
+                pass
                 
         self.destroy()
 
