@@ -148,8 +148,11 @@ class ModelManager:
             2. AMD ROCm (rocm-smi)             — Linux only
             3. AMD kernel sysfs (amdgpu)       — Linux only
             4. AMD Software (amdsmi)           — Windows only
+            5. macOS unified memory              — system_profiler
 
         Returns 0 if no GPU VRAM can be detected.
+        Returns a very large number on macOS to signal "infinite" VRAM
+        (Metal can use all available system memory).
         """
         system = platform.system().lower()  # 'linux' | 'windows' | 'darwin'
 
@@ -202,6 +205,20 @@ class ModelManager:
                     if "VRAM" in line and "MiB" in line:
                         mib = float(line.split(":")[1].strip().split("MiB")[0].strip())
                         return int(mib * 1024 * 1024)
+            except Exception:
+                pass
+
+        # --- macOS unified memory (Apple Silicon) ---
+        # Metal can use all available system RAM for GPU inference.
+        if system == "darwin":
+            try:
+                res = subprocess.run(
+                    ["sysctl", "hw.memsize"],
+                    capture_output=True, text=True, timeout=5
+                )
+                # e.g. "hw.memsize: 34359738368"
+                val = res.stdout.strip().split(":")[1].strip()
+                return int(val)
             except Exception:
                 pass
 
@@ -278,6 +295,11 @@ class ModelManager:
         # 1. Hardware Discovery
         total_vram = self.get_total_vram()
         print(f"{_PFX} Detected VRAM: {total_vram / (1024**3):.2f} GB")
+
+        # Guard: without a GPU there is nothing to optimize
+        if total_vram == 0:
+            print(f"{_PFX} No GPU VRAM detected. Skipping portfolio optimization.")
+            return []
 
         # 2. Get Demand Chart
         demand = await self.get_demand_chart()

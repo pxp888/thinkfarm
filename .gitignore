@@ -27,6 +27,7 @@ ENV/
 env.bak/
 venv.bak/
 env.py
+*.pyc
 
 
 # Environment variables
@@ -78,4 +79,3 @@ task-definition.json
 
 *.spec
 sync.sh
-
