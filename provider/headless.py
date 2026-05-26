@@ -34,18 +34,32 @@ _shutdown_requested = False
 
 
 def _load_config():
-    """Load configuration from ~/.thinkfarm/config.ini."""
+    """Load configuration from ~/.thinkfarm/config.ini.
+
+    If config.ini is missing, defaults to 30GB with model management turned on.
+    Priority: Config File > Environment Variable > Missing-config defaults > System ID
+    """
+    config_exists = os.path.exists(_CONFIG_PATH)
     config = configparser.ConfigParser()
     config.read(_CONFIG_PATH)
 
-    # Priority: Config File > Environment Variable > System ID > Default
+    # Defaults when config.ini is *missing* (before any env/config overrides)
+    if not config_exists:
+        # Use defaults: 30GB storage, auto_manage=True
+        auto_manage = True
+        managed_storage_gb = "50"
+        ollama_url = "http://127.0.0.1:11434"
+        provider_id = None  # will fall through to env/system ID
+
+    # Priority: Config File > Environment Variable > (Missing) defaults > System ID > UUID
     provider_id = os.environ.get("PROVIDER_ID", "") or \
                   (config.get("provider", "provider_id", fallback=None) if config.has_section("provider") else None) or \
+                  provider_id or \
                   str(uuid.uuid4())
-    ollama_url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
-    managed_storage_gb = os.environ.get("MANAGED_STORAGE_GB", "30")
-    auto_manage_str = os.environ.get("AUTO_MANAGE", "False").lower()
-    auto_manage = auto_manage_str in ("true", "1", "yes")
+    ollama_url = os.environ.get("OLLAMA_URL", "") or ollama_url
+    managed_storage_gb = os.environ.get("MANAGED_STORAGE_GB", "") or managed_storage_gb
+    auto_manage_str = os.environ.get("AUTO_MANAGE", "").lower()
+    auto_manage = auto_manage_str in ("true", "1", "yes") if auto_manage_str else auto_manage
 
     if config.has_section("provider"):
         provider_id = config.get("provider", "provider_id", fallback=provider_id)
@@ -213,6 +227,8 @@ def cmd_start():
     print(f"[CONFIG] Ollama URL: {config['ollama_url']}")
     print(f"[CONFIG] Managed Storage: {config['managed_storage_gb']} GB")
     print(f"[CONFIG] Auto Manage Models: {config['auto_manage']}")
+    if not os.path.exists(_CONFIG_PATH):
+        print("[CONFIG] Using defaults: 30GB storage, model management ON (no config.ini found)")
 
     # 1. Check for unscanned models
     url = config["ollama_url"].strip() or "http://127.0.0.1:11434"
