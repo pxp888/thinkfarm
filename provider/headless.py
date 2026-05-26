@@ -39,17 +39,14 @@ def _load_config():
     If config.ini is missing, defaults to 30GB with model management turned on.
     Priority: Config File > Environment Variable > Missing-config defaults > System ID
     """
-    config_exists = os.path.exists(_CONFIG_PATH)
     config = configparser.ConfigParser()
     config.read(_CONFIG_PATH)
 
-    # Defaults when config.ini is *missing* (before any env/config overrides)
-    if not config_exists:
-        # Use defaults: 30GB storage, auto_manage=True
-        auto_manage = True
-        managed_storage_gb = "50"
-        ollama_url = "http://127.0.0.1:11434"
-        provider_id = None  # will fall through to env/system ID
+    # Defaults: used when config.ini is missing, and as fallback when it exists
+    auto_manage = True
+    managed_storage_gb = "50"
+    ollama_url = "http://127.0.0.1:11434"
+    provider_id = None  # will fall through to env/system ID
 
     # Priority: Config File > Environment Variable > (Missing) defaults > System ID > UUID
     provider_id = os.environ.get("PROVIDER_ID", "") or \
