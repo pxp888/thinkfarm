@@ -20,9 +20,13 @@ Results are persisted to gpu_context_limits.json next to this file so that
 import asyncio
 import json
 import os
+import platform
 from typing import Dict, Optional
 
 import httpx
+
+# Detect Apple Silicon for unified memory handling
+_IS_MACOS_UNIFIED = platform.system() == "Darwin" and "arm64" in platform.machine()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -51,6 +55,53 @@ _PROBE_PROMPT = "Hi"
 
 # Log prefix so probe lines stand out in mixed output
 _PFX = "[CTX-PROBE]"
+
+
+# macOS / Apple Silicon unified memory probe helpers
+# Total RAM on the machine (used to estimate safe free memory threshold)
+
+def _get_available_ram_mb() -> int:
+    """Return available system RAM in MB.
+
+    Returns -1 (N/A) when the platform isn't measurable.
+
+    On **macOS (Apple Silicon)** uses `sysctl(8)`:
+      available = (pagefree + inactive + purgeable) × page_size
+    On **Linux** reads ``/proc/meminfo MemAvailable``.
+    Everything else returns ``-1``.
+    """
+    try:
+        if platform.system() == "Darwin":
+            import subprocess
+            try:
+                pagefree = int(subprocess.check_output(["sysctl", "-n", "vm.pagefree"]).strip())
+            except Exception:
+                pagefree = 0
+            try:
+                inactive = int(subprocess.check_output(["sysctl", "-n", "vm.pageinactive"]).strip())
+            except Exception:
+                inactive = 0
+            try:
+                purgeable = int(subprocess.check_output(["sysctl", "-n", "vm.pagepurgeable"]).strip())
+            except Exception:
+                purgeable = 0
+            page_size = int(subprocess.check_output(["sysctl", "-n", "vm.pagesize"]).strip())
+            avail_bytes = (pagefree + inactive + purgeable) * page_size
+            return avail_bytes // (1024 * 1024)
+        elif platform.system() == "Linux":
+            with open("/proc/meminfo", "r") as f:
+                for line in f:
+                    if line.startswith("MemAvailable"):
+                        kb = int(line.split(":")[1].strip())
+                        return kb // 1024
+        return -1  # platform not handled
+    except Exception:
+        return -1
+
+
+# Minimum free RAM (in MB) to leave after loading a model.
+# macOS will thrash hard otherwise.
+_MIN_FREE_RAM_MB = 2048  # 2 GB
 
 
 # ---------------------------------------------------------------------------
@@ -177,13 +228,19 @@ async def _probe_at_ctx(
 ) -> bool:
     """
     Load the model at the given num_ctx by sending a tiny probe request,
-    then poll /api/ps until the model appears and check size == size_vram.
+    then check if it fits safely.
+
+    On **Linux / non-unified-memory** systems: compares `size` vs `size_vram`.
+      Returns True  -> model is fully in GPU VRAM (no spillover).
+      Returns False -> VRAM spillover detected.
+
+    On **macOS Apple Silicon (unified memory)**: there is no separate VRAM,
+      so `size == size_vram` is always True. Here we check whether loading
+      the model would leave enough *free system RAM*.
 
     Uses /api/embed for embedding models, /api/generate for all others.
-
-    Returns True  -> model runs fully on GPU at this context length.
-    Returns False -> spillover detected or model failed to load.
     """
+
     if is_embed:
         # Embedding models: use /api/embed - /api/generate returns an error.
         print(f"{_PFX}     Sending probe embed (num_ctx={num_ctx:,}) ...", flush=True)
@@ -229,7 +286,18 @@ async def _probe_at_ctx(
             print(f"{_PFX}     ERROR during probe generate: {e}")
             return False
 
-    # Step 2: poll /api/ps until this model appears
+    # Interpret the result based on platform.
+    if _IS_MACOS_UNIFIED:
+        # No separate VRAM on Apple Silicon - check free system RAM instead.
+        remaining_free_mb = _get_available_ram_mb()
+        if remaining_free_mb < 0:
+            print(f"{_PFX}     Could not measure available RAM - defaulting to GPU-only check.")
+            return True  # be permissive; fallback is safer
+        print(
+            f"{_PFX}     macOS free RAM: {remaining_free_mb:,} MB | "
+            f"{'[OK - safe headroom]' if remaining_free_mb >= _MIN_FREE_RAM_MB else '[WARN - low free RAM]'}"
+        )
+        return remaining_free_mb >= _MIN_FREE_RAM_MB
     print(f"{_PFX}     Polling /api/ps for {model_name} ...", flush=True)
     for attempt in range(1, _PS_POLL_ATTEMPTS + 1):
         await asyncio.sleep(_PS_POLL_INTERVAL)
