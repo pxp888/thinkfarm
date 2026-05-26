@@ -395,15 +395,25 @@ class ModelManager:
             # await asyncio.sleep(delay)
             
             print(f"{_PFX} Pulling managed model: {model}")
+            stream_ok = False
             try:
                 async for _ in self.ollama.pull_model(model):
                     pass
+                stream_ok = True
+            except Exception as e:
+                print(f"{_PFX} Pull stream error for {model}: {e}")
+
+            # Ground truth: check if model actually landed on disk
+            models = await self.ollama.get_models()
+            local_names = {m.get("name") for m in models if m.get("name")}
+
+            if model in local_names:
                 self.manifest.add(model)
                 self._save_manifest()
                 newly_pulled.append(model)
                 print(f"{_PFX} Successfully pulled {model}")
-            except Exception as e:
-                print(f"{_PFX} Failed to pull {model}: {e}")
+            else:
+                print(f"{_PFX} Pull finished but model not found on disk for {model}.")
 
         return newly_pulled
 
