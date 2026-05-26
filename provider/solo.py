@@ -17,6 +17,7 @@ import json
 import os
 import signal
 import sys
+import uuid
 from collections import deque
 from datetime import datetime
 
@@ -58,15 +59,24 @@ def load_config():
     config = configparser.ConfigParser()
     config_dir = os.path.expanduser("~/.thinkfarm")
     os.makedirs(config_dir, exist_ok=True)
-    config.read(os.path.join(config_dir, "config.ini"))
+    config_path = os.path.join(config_dir, "config.ini")
+    config.read(config_path)
 
-    try:
-        PROVIDER_ID = config.get("provider", "provider_id")
-    except (configparser.NoSectionError, configparser.NoOptionError):
-        PROVIDER_ID = None
+    # Priority: ENV > Config File > System ID > UUID
+    PROVIDER_ID = (
+        os.environ.get("PROVIDER_ID", "")
+        or (config.get("provider", "provider_id", fallback=None) if config.has_section("provider") else None)
+    ) or None
 
+    # Generate and persist a UUID if nothing is configured
     if not PROVIDER_ID:
-        print(f"Error: PROVIDER_ID not found in {os.path.join(config_dir, 'config.ini')}")
+        PROVIDER_ID = str(uuid.uuid4())
+        if not config.has_section("provider"):
+            config.add_section("provider")
+        config.set("provider", "provider_id", PROVIDER_ID)
+        with open(config_path, "w") as f:
+            config.write(f)
+        print(f"[WARN] No PROVIDER_ID configured. Generated new ID: {PROVIDER_ID}")
 
     print(f"Provider ID: {PROVIDER_ID}")
     print("Configuration loaded.")
