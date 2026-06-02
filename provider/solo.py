@@ -110,6 +110,9 @@ _last_activity_time: float = 0.0
 # Reference to the live WebSocket so execute_job can send chunks
 _ws_ref = None
 
+# Active inference tasks by job_id
+active_tasks: dict = {}
+
 
 # ---------------------------------------------------------------------------
 # Context-limit eligibility check
@@ -349,7 +352,16 @@ async def handle_server_message(websocket, data: dict):
     if msg_type == "job_published":
         await handle_job_published(websocket, data)
     elif msg_type == "job_assigned":
-        asyncio.create_task(execute_job_with_heartbeat_reset(websocket, data))
+        job_id = data.get("job_id")
+        task = asyncio.create_task(execute_job_with_heartbeat_reset(websocket, data))
+        if job_id:
+            active_tasks[job_id] = task
+    elif msg_type == "cancel_job":
+        job_id = data.get("job_id")
+        task = active_tasks.get(job_id)
+        if task:
+            print(f"Cancelling job {job_id} on request from server.")
+            task.cancel()
 
 
 async def handle_job_published(websocket, data: dict):
@@ -504,9 +516,12 @@ async def execute_job_with_heartbeat_reset(websocket, data: dict):
     if model:
         _last_model = model
 
+    job_id = data.get("job_id")
     try:
         await execute_job(websocket, data)
     finally:
+        if job_id:
+            active_tasks.pop(job_id, None)
         # Mark completion time so heartbeat waits another full interval
         _last_activity_time = asyncio.get_event_loop().time()
 
