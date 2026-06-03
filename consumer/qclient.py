@@ -67,6 +67,7 @@ class QConsumerGUI(QMainWindow):
         QTimer.singleShot(100, self.refresh_models)
         
         self.setup_tray()
+        self.start_btn.setFocus()
 
     def load_server_url(self):
         """Load SERVER_URL from .env file."""
@@ -158,7 +159,7 @@ class QConsumerGUI(QMainWindow):
         self.start_btn.setFixedHeight(45)
         self.start_btn.setStyleSheet("""
             QPushButton {
-                background-color: #2ecc71;
+                background-color: #10b981;
                 color: white;
                 border-radius: 8px;
                 font-weight: bold;
@@ -166,11 +167,11 @@ class QConsumerGUI(QMainWindow):
                 border: none;
             }
             QPushButton:hover {
-                background-color: #27ae60;
+                background-color: #059669;
             }
             QPushButton:disabled {
-                background-color: #333333;
-                color: #666666;
+                background-color: #d2d2d7;
+                color: #8e8e93;
             }
         """)
         self.start_btn.clicked.connect(self.start_service)
@@ -181,20 +182,19 @@ class QConsumerGUI(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.stop_btn.setStyleSheet("""
             QPushButton {
-                background-color: #333333;
-                color: #666666;
+                background-color: #8e8e93;
+                color: white;
                 border-radius: 8px;
                 font-weight: bold;
                 font-size: 14px;
                 border: none;
             }
             QPushButton:hover {
-                background-color: #e74c3c;
-                color: white;
+                background-color: #636366;
             }
             QPushButton:disabled {
-                background-color: #1a1a1a;
-                color: #444444;
+                background-color: #d2d2d7;
+                color: #8e8e93;
             }
         """)
         self.stop_btn.clicked.connect(self.stop_service)
@@ -202,7 +202,7 @@ class QConsumerGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Client v8")
+        self.info_label = QLabel("Client v9")
         self.info_label.setStyleSheet("color: #666666; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -380,7 +380,7 @@ class QConsumerGUI(QMainWindow):
         status_bar_layout.setContentsMargins(20, 0, 20, 0)
         
         self.status_dot = QLabel("●")
-        self.status_dot.setStyleSheet("color: #ff3b30; font-size: 22px; border: none;")
+        self.status_dot.setStyleSheet("color: #8e8e93; font-size: 22px; border: none;")
         status_bar_layout.addWidget(self.status_dot)
 
         self.status_text = QLabel("SYSTEM STOPPED")
@@ -567,17 +567,6 @@ class QConsumerGUI(QMainWindow):
     def _on_server_ready(self):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.stop_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #ff3b30;
-                color: white;
-                border-radius: 8px;
-                font-weight: bold;
-                font-size: 14px;
-                border: none;
-            }
-            QPushButton:hover { background-color: #ff2d55; }
-        """)
         self.status_text.setText("SYSTEM RUNNING")
         self.status_text.setStyleSheet("color: #34c759; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
         self.status_dot.setStyleSheet("color: #34c759; font-size: 22px; border: none;")
@@ -598,21 +587,9 @@ class QConsumerGUI(QMainWindow):
     def _update_ui_stopped(self):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.stop_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #333333;
-                color: #666666;
-                border-radius: 8px;
-                font-weight: bold;
-                font-size: 14px;
-                border: none;
-            }
-            QPushButton:hover { background-color: #e74c3c; color: white; }
-            QPushButton:disabled { background-color: #1a1a1a; color: #444444; }
-        """)
         self.status_text.setText("SYSTEM STOPPED")
         self.status_text.setStyleSheet("color: #86868b; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
-        self.status_dot.setStyleSheet("color: #ff3b30; font-size: 22px; border: none;")
+        self.status_dot.setStyleSheet("color: #8e8e93; font-size: 22px; border: none;")
 
     def load_consumer_id(self):
         try:
