@@ -1,6 +1,6 @@
 # thinkfarm
 
-![Think Farm](assets/comfy5.webp)
+![Think Farm](assets/banner1.webp)
 
 A distributed local LLM inference sharing system that lets you **provide** your local Ollama models to a network and **consume** models from other nodes - all presented through a unified **OpenAI-compatible API**.
 
