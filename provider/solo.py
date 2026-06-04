@@ -113,6 +113,15 @@ _ws_ref = None
 # Active inference tasks by job_id
 active_tasks: dict = {}
 
+# Event to trigger immediate status updates (heartbeats) and reset the timer
+status_update_event: asyncio.Event | None = None
+
+
+def trigger_status_update():
+    if status_update_event is not None:
+        status_update_event.set()
+
+
 
 # ---------------------------------------------------------------------------
 # Context-limit eligibility check
@@ -320,7 +329,14 @@ async def periodic_status_updates(websocket):
                     f"{len(status.get('models', []))} models, "
                     f"{len(status.get('loaded_models', []))} loaded"
                 )
-            await asyncio.sleep(30)
+            if status_update_event is not None:
+                try:
+                    await asyncio.wait_for(status_update_event.wait(), timeout=30.0)
+                    status_update_event.clear()
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                await asyncio.sleep(30)
         except websockets.exceptions.ConnectionClosed:
             print("[STATUS] WebSocket closed during status update — exiting loop.")
             break
@@ -503,6 +519,7 @@ async def execute_job(websocket, data: dict):
                 )
     finally:
         is_busy -= 1
+        trigger_status_update()
 
 
 async def execute_job_with_heartbeat_reset(websocket, data: dict):
@@ -567,13 +584,15 @@ async def _try_accept_job(websocket, data: dict):
 # ---------------------------------------------------------------------------
 async def main():
     """Bootstrap the provider: load config, init Ollama, start lifecycle tasks."""
+    global status_update_event, gpu_context_limits
+    status_update_event = asyncio.Event()
+
     load_config()
     if not PROVIDER_ID:
         print("[ERROR] Cannot start provider: PROVIDER_ID is missing in config.ini (searched in ~/.thinkfarm/)")
         return False
 
     # Load cached GPU context limits
-    global gpu_context_limits
     config_dir = os.path.expanduser("~/.thinkfarm")
     cache_path = os.path.join(config_dir, "gpu_context_limits.json")
     if os.path.exists(cache_path):

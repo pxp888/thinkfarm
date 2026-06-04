@@ -277,7 +277,7 @@ class ProviderGUI(ctk.CTk):
         self.stop_btn.grid(row=2, column=0, padx=25, pady=10, sticky="ew")
 
         # Version/Info at bottom of sidebar
-        self.info_label = ctk.CTkLabel(self.sidebar_frame, text="Provider v14",
+        self.info_label = ctk.CTkLabel(self.sidebar_frame, text="Provider v15",
                                        text_color="#666666",
                                        font=ctk.CTkFont(family=ui_font[0], size=11))
         self.info_label.grid(row=6, column=0, padx=20, pady=20)
