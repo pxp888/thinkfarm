@@ -65,38 +65,54 @@ def _get_available_ram_mb() -> int:
 
     Returns -1 (N/A) when the platform isn't measurable.
 
-    On **macOS (Apple Silicon)** uses `sysctl(8)`:
-      available = (pagefree + inactive + purgeable) × page_size
-    On **Linux** reads ``/proc/meminfo MemAvailable``.
-    Everything else returns ``-1``.
+    Order of preference:
+      1. ``psutil.virtual_memory()`` (preferred, works everywhere)
+      2. ``vm_stat`` CLI (macOS, still works on Sequoia+)
+      3. ``/proc/meminfo MemAvailable`` (Linux)
     """
+    def _round_page_to_mb(page_count: int, page_size: int = 4096) -> int:
+        return page_count * page_size // (1024 * 1024)
+
+    # 1. psutil -- preferred on all platforms
     try:
-        if platform.system() == "Darwin":
+        from psutil import virtual_memory as _psutil_vm
+        return int(_psutil_vm().available) // (1024 * 1024)
+    except Exception:
+        pass
+
+    # 2. macOS: fall back to ``vm_stat`` CLI
+    #    vm_stat still works on macOS 15+ even though the old sysctl OIDs don't.
+    if platform.system() == "Darwin":
+        try:
             import subprocess
-            try:
-                pagefree = int(subprocess.check_output(["sysctl", "-n", "vm.pagefree"]).strip())
-            except Exception:
-                pagefree = 0
-            try:
-                inactive = int(subprocess.check_output(["sysctl", "-n", "vm.pageinactive"]).strip())
-            except Exception:
-                inactive = 0
-            try:
-                purgeable = int(subprocess.check_output(["sysctl", "-n", "vm.pagepurgeable"]).strip())
-            except Exception:
-                purgeable = 0
-            page_size = int(subprocess.check_output(["sysctl", "-n", "vm.pagesize"]).strip())
-            avail_bytes = (pagefree + inactive + purgeable) * page_size
-            return avail_bytes // (1024 * 1024)
-        elif platform.system() == "Linux":
+            raw = subprocess.check_output(["vm_stat"]).decode()
+            # Parse lines like ": Pages free:               12345"
+            pages_free = pages_inactive = pages_speculative = 0
+            for line in raw.splitlines():
+                if line.startswith("Pages free:"):
+                    pages_free = int(line.split(":")[1].strip())
+                elif line.startswith("Pages inactive:"):
+                    pages_inactive = int(line.split(":")[1].strip())
+                elif line.startswith("Pages speculative:"):
+                    pages_speculative = int(line.split(":")[1].strip())
+            # macOS available ~= free + inactive + speculative
+            avail_pages = pages_free + pages_inactive + pages_speculative
+            return _round_page_to_mb(avail_pages)
+        except Exception:
+            pass
+
+    # 3. Linux: ``/proc/meminfo MemAvailable``
+    if platform.system() == "Linux":
+        try:
             with open("/proc/meminfo", "r") as f:
                 for line in f:
                     if line.startswith("MemAvailable"):
                         kb = int(line.split(":")[1].strip())
                         return kb // 1024
-        return -1  # platform not handled
-    except Exception:
-        return -1
+        except Exception:
+            pass
+
+    return -1  # all methods failed
 
 
 # Minimum free RAM (in MB) to leave after loading a model.
@@ -182,10 +198,10 @@ async def _get_model_info(base_url: str, model_name: str) -> tuple[int, bool, bo
         capabilities = info.get("capabilities") or []
         model_info = info.get("model_info") or {}
         arch = str(model_info.get("general.architecture", "")).lower()
-        
+
         is_embed = (
-            template == "" or 
-            "embedding" in capabilities or 
+            template == "" or
+            "embedding" in capabilities or
             any(f in ["bert", "nomic-bert"] for f in families) or
             "bert" in arch
         )
@@ -481,7 +497,7 @@ async def _probe_new_models(
         # Detect model type once - drives probe and unload endpoint choice.
         # Also captures the declared max ctx to avoid a second /api/show call.
         upper_bound, is_embed, is_eligible = await _get_model_info(base_url, model_name)
-        
+
         if not is_eligible:
             print(f"{_PFX}  Skipping {model_name}: cloud or custom model is not eligible for sharing.")
             # Set to 0 in limits so we don't try again next time, but it won't be announced by the client anyway
@@ -495,7 +511,7 @@ async def _probe_new_models(
             print(f"{_PFX}  Model type: GENERATIVE - will probe via /api/generate")
 
         if is_embed:
-            # Embedding models are always "safe" even if they spill to CPU, 
+            # Embedding models are always "safe" even if they spill to CPU,
             # as they don't have the same context/OOM risks as generative models.
             print(f"{_PFX}  RESULT: {model_name} is an embedding model. Storing -1 (N/A).")
             limits[model_name] = -1

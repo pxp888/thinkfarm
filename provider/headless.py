@@ -183,7 +183,7 @@ def _stop_service_sync():
     print("[STOP] Initiating server shutdown...")
     _server_process.terminate()
     try:
-        _server_process.wait(timeout=60)
+        _server_process.wait(timeout=180)
     except subprocess.TimeoutExpired:
         print("[STOP] Soft stop timed out, forcing termination...")
         _server_process.kill()
