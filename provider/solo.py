@@ -302,41 +302,46 @@ async def _get_changed_loaded_status() -> dict | None:
 
 async def periodic_status_updates(websocket):
     global _previous_status
-    _heartbeat_counter = 0
+    last_full_update_time = asyncio.get_event_loop().time()
     while True:
         try:
-            status = await _get_changed_loaded_status()
-            _heartbeat_counter += 1
-            if status is None and _heartbeat_counter >= 10:
-                status = await get_provider_status()
-                _heartbeat_counter = 0
-            if status is not None:
-                _update_local_model_sets(status)
-                await websocket.send(json.dumps({"type": "status", **status}))
-                _previous_status = {
-                    "models": frozenset(
-                        (m.get("name") if isinstance(m, dict) else m)
-                        for m in status.get("models", [])
-                    ),
-                    "loaded_models": frozenset(
-                        (m.get("name") if isinstance(m, dict) else m)
-                        for m in status.get("loaded_models", [])
-                    ),
-                    "is_busy": status.get("is_busy", False),
-                }
-                print(
-                    f"[STATUS] Sent update: "
-                    f"{len(status.get('models', []))} models, "
-                    f"{len(status.get('loaded_models', []))} loaded"
-                )
             if status_update_event is not None:
                 try:
                     await asyncio.wait_for(status_update_event.wait(), timeout=30.0)
                     status_update_event.clear()
+                    is_event_triggered = True
                 except asyncio.TimeoutError:
-                    pass
+                    is_event_triggered = False
             else:
                 await asyncio.sleep(30)
+                is_event_triggered = False
+
+            current_time = asyncio.get_event_loop().time()
+            if is_event_triggered or (current_time - last_full_update_time >= 300.0):
+                status = await get_provider_status()
+                if status is not None:
+                    _update_local_model_sets(status)
+                    await websocket.send(json.dumps({"type": "status", **status}))
+                    _previous_status = {
+                        "models": frozenset(
+                            (m.get("name") if isinstance(m, dict) else m)
+                            for m in status.get("models", [])
+                        ),
+                        "loaded_models": frozenset(
+                            (m.get("name") if isinstance(m, dict) else m)
+                            for m in status.get("loaded_models", [])
+                        ),
+                        "is_busy": status.get("is_busy", False),
+                    }
+                    last_full_update_time = current_time
+                    print(
+                        f"[STATUS] Sent update: "
+                        f"{len(status.get('models', []))} models, "
+                        f"{len(status.get('loaded_models', []))} loaded"
+                    )
+            else:
+                # Send a simple ping ('hi') to keep the connection warm
+                await websocket.send(json.dumps({"type": "ping"}))
         except websockets.exceptions.ConnectionClosed:
             print("[STATUS] WebSocket closed during status update — exiting loop.")
             break

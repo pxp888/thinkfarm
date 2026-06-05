@@ -107,7 +107,7 @@ class QConsumerGUI(QMainWindow):
             QLineEdit {
                 background-color: #f5f5f7;
                 border: 1px solid #d2d2d7;
-                border-radius: 8px;
+                border-radius: 0px;
                 padding: 8px;
                 color: #1d1d1f;
                 font-family: "JetBrains Mono", "Fira Code", "Monospace";
@@ -119,7 +119,7 @@ class QConsumerGUI(QMainWindow):
             }
             QScrollArea {
                 border: 1px solid #d2d2d7;
-                border-radius: 8px;
+                border-radius: 0px;
                 background-color: #f5f5f7;
             }
         """)
@@ -143,7 +143,7 @@ class QConsumerGUI(QMainWindow):
         pixmap = QPixmap(logo_path)
         if not pixmap.isNull():
             pixmap = pixmap.scaled(
-                160, 160, Qt.AspectRatioMode.KeepAspectRatio,
+                190, 190, Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             )
             self.logo_label = QLabel()
@@ -161,7 +161,7 @@ class QConsumerGUI(QMainWindow):
             QPushButton {
                 background-color: #10b981;
                 color: white;
-                border-radius: 8px;
+                border-radius: 0px;
                 font-weight: bold;
                 font-size: 14px;
                 border: none;
@@ -184,7 +184,7 @@ class QConsumerGUI(QMainWindow):
             QPushButton {
                 background-color: #8e8e93;
                 color: white;
-                border-radius: 8px;
+                border-radius: 0px;
                 font-weight: bold;
                 font-size: 14px;
                 border: none;
@@ -202,7 +202,7 @@ class QConsumerGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Client v9")
+        self.info_label = QLabel("Client v10")
         self.info_label.setStyleSheet("color: #666666; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -221,7 +221,7 @@ class QConsumerGUI(QMainWindow):
         self.config_card.setStyleSheet("""
             QFrame#ConfigCard {
                 background-color: #ffffff;
-                border-radius: 16px;
+                border-radius: 0px;
                 border: 1px solid #e5e5e7;
             }
         """)
@@ -230,9 +230,7 @@ class QConsumerGUI(QMainWindow):
         config_card_layout.setContentsMargins(30, 30, 30, 30)
         config_card_layout.setSpacing(15)
 
-        self.header_label = QLabel("Client Configuration")
-        self.header_label.setStyleSheet("font-size: 22px; font-weight: 500; border: none; margin-bottom: 10px;")
-        config_card_layout.addWidget(self.header_label)
+
 
         # ID and Port Grid
         grid_layout = QGridLayout()
@@ -278,7 +276,7 @@ class QConsumerGUI(QMainWindow):
             QPushButton {
                 background-color: #f5f5f7;
                 border: 1px solid #d2d2d7;
-                border-radius: 6px;
+                border-radius: 0px;
                 font-size: 11px;
                 font-weight: bold;
                 color: #1d1d1f;
@@ -304,7 +302,7 @@ class QConsumerGUI(QMainWindow):
             QLineEdit {
                 background-color: #ffffff;
                 border: 1px solid #d2d2d7;
-                border-radius: 8px;
+                border-radius: 0px;
                 height: 32px;
             }
         """)
@@ -324,7 +322,7 @@ class QConsumerGUI(QMainWindow):
                 QPushButton {
                     background-color: #f5f5f7;
                     border: 1px solid #d2d2d7;
-                    border-radius: 6px;
+                    border-radius: 0px;
                     font-size: 11px;
                     font-weight: bold;
                     color: #1d1d1f;
@@ -358,7 +356,7 @@ class QConsumerGUI(QMainWindow):
             QPushButton {
                 background-color: #8e8e93;
                 color: white;
-                border-radius: 8px;
+                border-radius: 0px;
                 font-weight: bold;
                 font-size: 14px;
                 border: none;
@@ -375,7 +373,7 @@ class QConsumerGUI(QMainWindow):
         # Status Bar
         self.status_bar_frame = QFrame()
         self.status_bar_frame.setFixedHeight(50)
-        self.status_bar_frame.setStyleSheet("background-color: #ffffff; border: 1px solid #e5e5e7; border-radius: 8px;")
+        self.status_bar_frame.setStyleSheet("background-color: #ffffff; border: 1px solid #e5e5e7; border-radius: 0px;")
         status_bar_layout = QHBoxLayout(self.status_bar_frame)
         status_bar_layout.setContentsMargins(20, 0, 20, 0)
         

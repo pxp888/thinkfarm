@@ -14,8 +14,15 @@ import sys
 import threading
 import time
 import socket
-import customtkinter as ctk
-from tkinter import messagebox
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QLineEdit, QCheckBox, QFrame, QGridLayout, QMessageBox,
+    QSystemTrayIcon, QMenu
+)
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal as Signal, QObject
+from PyQt6.QtGui import QFont, QPixmap, QIcon, QAction
+
 import solo
 import context_prober
 from dotenv import load_dotenv
@@ -27,11 +34,14 @@ load_dotenv()
 
 _CONFIG_PATH = os.path.expanduser("~/.thinkfarm/config.ini")
 
-ctk.set_appearance_mode("light")
-ctk.set_default_color_theme("blue")
+
+class ProviderSignals(QObject):
+    ui_state_signal = Signal(str)  # "started", "stopped", "probing", "stopping"
+    trigger_actual_start = Signal()
+    show_message = Signal(str, str, str)  # msg_type, title, message
 
 
-class ProviderGUI(ctk.CTk):
+class ProviderGUI(QMainWindow):
     def _get_free_port(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('', 0))
@@ -39,11 +49,13 @@ class ProviderGUI(ctk.CTk):
 
     def __init__(self):
         super().__init__()
-        self.title("thinkfarm Provider Control")
-        self.geometry("800x500")
-        self.configure(padx=0, pady=0)
-        self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.setWindowTitle("thinkfarm Provider Control")
+        self.resize(800, 520)
+
+        self.signals = ProviderSignals()
+        self.signals.ui_state_signal.connect(self._handle_ui_state_change)
+        self.signals.trigger_actual_start.connect(self._actual_start_service)
+        self.signals.show_message.connect(self._handle_show_message)
 
         self._server_process = None
         self._stop_event = threading.Event()
@@ -61,6 +73,7 @@ class ProviderGUI(ctk.CTk):
 
         self.setup_ui()
         self._load_config()
+        self.setup_tray()
 
     def restart_ollama_server(self):
         print("[MGMT] Restarting/checking internal ollama server...")
@@ -178,20 +191,14 @@ class ProviderGUI(ctk.CTk):
                     config.write(f)
 
             if config.has_option("provider", "provider_id"):
-                self.provider_id_entry.delete(0, "end")
-                self.provider_id_entry.insert(0, config.get("provider", "provider_id"))
+                self.provider_id_entry.setText(config.get("provider", "provider_id"))
             if config.has_option("provider", "ollama_models_path"):
-                self.models_path_entry.delete(0, "end")
-                self.models_path_entry.insert(0, config.get("provider", "ollama_models_path"))
+                self.models_path_entry.setText(config.get("provider", "ollama_models_path"))
             if config.has_option("provider", "managed_storage_gb"):
-                self.storage_entry.delete(0, "end")
-                self.storage_entry.insert(0, config.get("provider", "managed_storage_gb"))
+                self.storage_entry.setText(config.get("provider", "managed_storage_gb"))
             if config.has_option("provider", "auto_manage"):
                 val = config.getboolean("provider", "auto_manage", fallback=False)
-                if val:
-                    self.auto_manage_cb.select()
-                else:
-                    self.auto_manage_cb.deselect()
+                self.auto_manage_cb.setChecked(val)
 
     def _managed_model_loop(self):
         """Background loop to handle automated model management."""
@@ -249,119 +256,251 @@ class ProviderGUI(ctk.CTk):
 
     # ── UI ────────────────────────────────────────────────────
     def setup_ui(self):
-        ui_font = ("Inter", "Ubuntu", "Segoe UI", "sans-serif")
-        mono_font = ("JetBrains Mono", "Fira Code", "Cascadia Code", "Monospace")
-        
-        self.configure(fg_color="#f5f5f7")
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #f5f5f7;
+            }
+            QLabel {
+                color: #1d1d1f;
+                font-family: "Inter", "Ubuntu", "Segoe UI", sans-serif;
+            }
+            QLineEdit {
+                background-color: #f5f5f7;
+                border: 1px solid #d2d2d7;
+                border-radius: 0px;
+                padding: 8px;
+                color: #1d1d1f;
+                font-family: "JetBrains Mono", "Fira Code", "Monospace";
+            }
+            QCheckBox {
+                color: #1d1d1f;
+                font-family: "Inter", "Ubuntu", sans-serif;
+                font-size: 13px;
+            }
+        """)
 
-        # Sidebar - Pure Black
-        self.sidebar_frame = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color="#e6e6e6", border_width=0)
-        self.sidebar_frame.grid(row=0, column=0, rowspan=2, sticky="nsew")
-        self.sidebar_frame.grid_rowconfigure(5, weight=1)
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="thinkfarm",
-                                       text_color="black",
-                                       font=ctk.CTkFont(family=ui_font[0], size=24, weight="normal"))
-        self.logo_label.grid(row=0, column=0, padx=25, pady=(40, 40))
+        # Sidebar - Light Grey
+        self.sidebar_frame = QFrame()
+        self.sidebar_frame.setFixedWidth(240)
+        self.sidebar_frame.setStyleSheet("background-color: #e6e6e6; border: none;")
+        sidebar_layout = QVBoxLayout(self.sidebar_frame)
+        sidebar_layout.setContentsMargins(25, 40, 25, 20)
+        sidebar_layout.setSpacing(10)
 
-        self.start_btn = ctk.CTkButton(self.sidebar_frame, text="Start Provider", height=45, corner_radius=8,
-                                       command=self.start_service, fg_color="#2ecc71", hover_color="#27ae60",
-                                       text_color="#FFFFFF",
-                                       font=ctk.CTkFont(family=ui_font[0], size=14, weight="bold"))
-        self.start_btn.grid(row=1, column=0, padx=25, pady=10, sticky="ew")
+        # Logo image at top of sidebar
+        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thinkfarm.webp")
+        pixmap = QPixmap(logo_path)
+        if not pixmap.isNull():
+            pixmap = pixmap.scaled(
+                190, 190, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.logo_label = QLabel()
+            self.logo_label.setPixmap(pixmap)
+            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        else:
+            self.logo_label = QLabel("thinkfarm")
+            self.logo_label.setStyleSheet("color: #000000; font-size: 24px; font-weight: 500; margin-bottom: 30px;")
+            self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sidebar_layout.addWidget(self.logo_label)
 
-        self.stop_btn = ctk.CTkButton(self.sidebar_frame, text="Stop Provider", height=45, corner_radius=8,
-                                      command=self.stop_service, state="disabled", fg_color="#333333", hover_color="#e74c3c",
-                                      text_color="#FFFFFF",
-                                      font=ctk.CTkFont(family=ui_font[0], size=14, weight="bold"))
-        self.stop_btn.grid(row=2, column=0, padx=25, pady=10, sticky="ew")
+        self.start_btn = QPushButton("Start Provider")
+        self.start_btn.setFixedHeight(45)
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2ecc71;
+                color: white;
+                border-radius: 0px;
+                font-weight: bold;
+                font-size: 14px;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #27ae60;
+            }
+            QPushButton:disabled {
+                background-color: #d1d1d6;
+                color: #8e8e93;
+            }
+        """)
+        self.start_btn.clicked.connect(self.start_service)
+        sidebar_layout.addWidget(self.start_btn)
 
-        # Version/Info at bottom of sidebar
-        self.info_label = ctk.CTkLabel(self.sidebar_frame, text="Provider v16",
-                                       text_color="#666666",
-                                       font=ctk.CTkFont(family=ui_font[0], size=11))
-        self.info_label.grid(row=6, column=0, padx=20, pady=20)
+        self.stop_btn = QPushButton("Stop Provider")
+        self.stop_btn.setFixedHeight(45)
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #333333;
+                color: white;
+                border-radius: 0px;
+                font-weight: bold;
+                font-size: 14px;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #e74c3c;
+            }
+            QPushButton:disabled {
+                background-color: #d1d1d6;
+                color: #8e8e93;
+            }
+        """)
+        self.stop_btn.clicked.connect(self.stop_service)
+        sidebar_layout.addWidget(self.stop_btn)
 
-        # Main content
-        self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        self.main_frame.grid(row=0, column=1, sticky="nsew", padx=40, pady=40)
-        self.main_frame.grid_columnconfigure(0, weight=1)
+        sidebar_layout.addStretch()
 
-        self.config_card = ctk.CTkFrame(self.main_frame, corner_radius=16, fg_color="#ffffff", border_width=1, border_color="#e5e5e7")
-        self.config_card.grid(row=0, column=0, sticky="ew", pady=(0, 20))
-        self.config_card.grid_columnconfigure(1, weight=1)
+        self.info_label = QLabel("Provider v17")
+        self.info_label.setStyleSheet("color: #666666; font-size: 11px;")
+        self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sidebar_layout.addWidget(self.info_label)
 
-        self.header_label = ctk.CTkLabel(self.config_card, text="Provider Configuration",
-                                         text_color="#1d1d1f",
-                                         font=ctk.CTkFont(family=ui_font[0], size=22, weight="bold"))
-        self.header_label.grid(row=0, column=0, columnspan=3, sticky="w", padx=30, pady=(30, 20))
+        main_layout.addWidget(self.sidebar_frame)
 
-        self.provider_id_label = ctk.CTkLabel(self.config_card, text="Provider Identifier",
-                                              text_color="#86868b",
-                                              font=ctk.CTkFont(family=ui_font[0], size=13, weight="normal"))
-        self.provider_id_label.grid(row=1, column=0, padx=(30, 15), pady=(0, 15), sticky="w")
+        # Main Content
+        self.content_container = QWidget()
+        content_layout = QVBoxLayout(self.content_container)
+        content_layout.setContentsMargins(40, 40, 40, 40)
+        content_layout.setSpacing(20)
+        main_layout.addWidget(self.content_container)
 
-        self.provider_id_entry = ctk.CTkEntry(self.config_card, placeholder_text="Enter unique ID...",
-                                              height=40, corner_radius=8, border_width=1,
-                                              fg_color="#f5f5f7", border_color="#d2d2d7",
-                                              text_color="#1d1d1f",
-                                              font=ctk.CTkFont(family=mono_font[0], size=13))
-        self.provider_id_entry.grid(row=1, column=1, padx=(0, 30), pady=(0, 15), sticky="ew")
+        # Config Card
+        self.config_card = QFrame()
+        self.config_card.setStyleSheet("""
+            QFrame#ConfigCard {
+                background-color: #ffffff;
+                border-radius: 0px;
+                border: 1px solid #e5e5e7;
+            }
+        """)
+        self.config_card.setObjectName("ConfigCard")
+        config_card_layout = QVBoxLayout(self.config_card)
+        config_card_layout.setContentsMargins(30, 30, 30, 30)
+        config_card_layout.setSpacing(15)
 
-        self.models_path_label = ctk.CTkLabel(self.config_card, text="Model Storage Path",
-                                              text_color="#86868b",
-                                              font=ctk.CTkFont(family=ui_font[0], size=13, weight="normal"))
-        self.models_path_label.grid(row=2, column=0, padx=(30, 15), pady=(0, 15), sticky="w")
+        # Config Grid
+        grid_layout = QGridLayout()
+        grid_layout.setSpacing(15)
 
-        self.models_path_entry = ctk.CTkEntry(self.config_card, placeholder_text="D:\\Ollama\\Models (Optional)",
-                                              height=40, corner_radius=8, border_width=1,
-                                              fg_color="#f5f5f7", border_color="#d2d2d7",
-                                              text_color="#1d1d1f",
-                                              font=ctk.CTkFont(family=mono_font[0], size=13))
-        self.models_path_entry.grid(row=2, column=1, padx=(0, 30), pady=(0, 15), sticky="ew")
+        self.provider_id_label = QLabel("Provider Identifier")
+        self.provider_id_label.setStyleSheet("color: #86868b; font-size: 13px; border: none;")
+        grid_layout.addWidget(self.provider_id_label, 0, 0)
 
-        self.auto_manage_cb = ctk.CTkCheckBox(self.config_card, text="Manage models automatically",
-                                              text_color="#86868b",
-                                              font=ctk.CTkFont(family=ui_font[0], size=13, weight="normal"),
-                                              fg_color="#FF7F7F", hover_color="#FF5F5F")
-        self.auto_manage_cb.grid(row=3, column=1, padx=(0, 30), pady=(0, 15), sticky="w")
+        self.provider_id_entry = QLineEdit()
+        self.provider_id_entry.setPlaceholderText("Enter unique ID...")
+        grid_layout.addWidget(self.provider_id_entry, 0, 1)
 
-        self.storage_label = ctk.CTkLabel(self.config_card, text="Managed Model Storage (GB)",
-                                         text_color="#86868b",
-                                         font=ctk.CTkFont(family=ui_font[0], size=13, weight="normal"))
-        self.storage_label.grid(row=4, column=0, padx=(30, 15), pady=(0, 30), sticky="w")
+        self.models_path_label = QLabel("Model Storage Path")
+        self.models_path_label.setStyleSheet("color: #86868b; font-size: 13px; border: none;")
+        grid_layout.addWidget(self.models_path_label, 1, 0)
 
-        self.storage_entry = ctk.CTkEntry(self.config_card, placeholder_text="30",
-                                          height=40, corner_radius=8, border_width=1,
-                                          fg_color="#f5f5f7", border_color="#d2d2d7",
-                                          text_color="#1d1d1f",
-                                          font=ctk.CTkFont(family=mono_font[0], size=13))
-        self.storage_entry.insert(0, "30")
-        self.storage_entry.grid(row=4, column=1, padx=(0, 30), pady=(0, 30), sticky="ew")
+        self.models_path_entry = QLineEdit()
+        self.models_path_entry.setPlaceholderText("D:\\Ollama\\Models (Optional)")
+        grid_layout.addWidget(self.models_path_entry, 1, 1)
 
-        self.save_btn = ctk.CTkButton(self.main_frame, text="Save Settings", width=160, height=40, corner_radius=8,
-                                      command=self.save_config, fg_color="#8e8e93", hover_color="#636366",
-                                      text_color="#FFFFFF",
-                                      font=ctk.CTkFont(family=ui_font[0], size=14, weight="bold"))
-        self.save_btn.grid(row=1, column=0, sticky="e")
+        self.auto_manage_cb = QCheckBox("Manage models automatically")
+        self.auto_manage_cb.setStyleSheet("color: #86868b; font-size: 13px; border: none;")
+        grid_layout.addWidget(self.auto_manage_cb, 2, 1)
 
-        # Status bar
-        self.status_frame = ctk.CTkFrame(self, height=50, corner_radius=0, fg_color="#ffffff", border_width=1, border_color="#e5e5e7")
-        self.status_frame.grid(row=1, column=1, sticky="ew")
+        self.storage_label = QLabel("Managed Model Storage (GB)")
+        self.storage_label.setStyleSheet("color: #86868b; font-size: 13px; border: none;")
+        grid_layout.addWidget(self.storage_label, 3, 0)
 
-        self.status_dot = ctk.CTkLabel(self.status_frame, text="●", text_color="#ff3b30",
-                                       font=ctk.CTkFont(family=ui_font[0], size=22))
-        self.status_dot.pack(side="left", padx=(30, 10))
+        self.storage_entry = QLineEdit()
+        self.storage_entry.setText("30")
+        grid_layout.addWidget(self.storage_entry, 3, 1)
 
-        self.status_text = ctk.CTkLabel(self.status_frame, text="SYSTEM STOPPED",
-                                         text_color="#86868b",
-                                         font=ctk.CTkFont(family=ui_font[0], size=12, weight="bold"))
-        self.status_text.pack(side="left")
+        config_card_layout.addLayout(grid_layout)
+        config_card_layout.addStretch()
+
+        # Save Button
+        save_btn_layout = QHBoxLayout()
+        save_btn_layout.addStretch()
+        self.save_btn = QPushButton("Save Settings")
+        self.save_btn.setFixedSize(160, 40)
+        self.save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #8e8e93;
+                color: white;
+                border-radius: 0px;
+                font-weight: bold;
+                font-size: 14px;
+                border: none;
+            }
+            QPushButton:hover { background-color: #636366; }
+        """)
+        self.save_btn.clicked.connect(self.save_config)
+        save_btn_layout.addWidget(self.save_btn)
+        config_card_layout.addLayout(save_btn_layout)
+
+        content_layout.addWidget(self.config_card, 1)
+
+        # Status Bar
+        self.status_bar_frame = QFrame()
+        self.status_bar_frame.setFixedHeight(50)
+        self.status_bar_frame.setStyleSheet("background-color: #ffffff; border: 1px solid #e5e5e7; border-radius: 0px;")
+        status_bar_layout = QHBoxLayout(self.status_bar_frame)
+        status_bar_layout.setContentsMargins(20, 0, 20, 0)
+
+        self.status_dot = QLabel("●")
+        self.status_dot.setStyleSheet("color: #ff3b30; font-size: 22px; border: none;")
+        status_bar_layout.addWidget(self.status_dot)
+
+        self.status_text = QLabel("SYSTEM STOPPED")
+        self.status_text.setStyleSheet("color: #86868b; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
+        status_bar_layout.addWidget(self.status_text)
+        status_bar_layout.addStretch()
+
+        content_layout.addWidget(self.status_bar_frame)
+
+    # ── Thread-Safe Signal Handlers ─────────────────────────────
+    def _handle_ui_state_change(self, state):
+        if state == "started":
+            self.start_btn.setEnabled(False)
+            self.start_btn.setStyleSheet("QPushButton { background-color: #d1d1d6; color: #8e8e93; border: none; font-weight: bold; font-size: 14px; }")
+            self.stop_btn.setEnabled(True)
+            self.stop_btn.setStyleSheet("QPushButton { background-color: #ff3b30; color: white; border: none; font-weight: bold; font-size: 14px; } QPushButton:hover { background-color: #ff2d55; }")
+            self.status_text.setText("SYSTEM RUNNING")
+            self.status_text.setStyleSheet("color: #34c759; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
+            self.status_dot.setStyleSheet("color: #34c759; font-size: 22px; border: none;")
+        elif state == "probing":
+            self.status_text.setText("SYSTEM PROBING")
+            self.status_text.setStyleSheet("color: #3498db; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
+            self.status_dot.setStyleSheet("color: #3498db; font-size: 22px; border: none;")
+        elif state == "stopping":
+            self.stop_btn.setEnabled(False)
+            self.stop_btn.setStyleSheet("QPushButton { background-color: #d1d1d6; color: #8e8e93; border: none; font-weight: bold; font-size: 14px; }")
+            self.status_text.setText("FINISHING JOBS")
+            self.status_text.setStyleSheet("color: #f39c12; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
+            self.status_dot.setStyleSheet("color: #f39c12; font-size: 22px; border: none;")
+        elif state == "stopped":
+            self.start_btn.setEnabled(True)
+            self.start_btn.setStyleSheet("QPushButton { background-color: #34c759; color: white; border: none; font-weight: bold; font-size: 14px; } QPushButton:hover { background-color: #30d158; }")
+            self.stop_btn.setEnabled(False)
+            self.stop_btn.setStyleSheet("QPushButton { background-color: #e5e5ea; color: #8e8e93; border: none; font-weight: bold; font-size: 14px; }")
+            self.status_text.setText("SYSTEM STOPPED")
+            self.status_text.setStyleSheet("color: #86868b; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
+            self.status_dot.setStyleSheet("color: #ff3b30; font-size: 22px; border: none;")
+
+    def _handle_show_message(self, msg_type, title, message):
+        if msg_type == "info":
+            QMessageBox.information(self, title, message)
+        elif msg_type == "warning":
+            QMessageBox.warning(self, title, message)
+        elif msg_type == "error":
+            QMessageBox.critical(self, title, message)
 
     # ── start / stop ────────────────────────────────────────────
     def start_service(self):
         """Orchestrate startup: probe context if needed, then start solo.py."""
-        self.start_btn.configure(state="disabled", fg_color="#d1d1d6")
+        self.start_btn.setEnabled(False)
         self._stop_event.clear()
 
         def _startup_logic():
@@ -377,7 +516,7 @@ class ProviderGUI(ctk.CTk):
                 
                 if unscanned:
                     print(f"[STARTUP] Found {len(unscanned)} unscanned model(s): {unscanned}")
-                    self.after(0, self._update_ui_probing)
+                    self.signals.ui_state_signal.emit("probing")
                     
                     # Run probing
                     asyncio.run(context_prober.run_context_probing(
@@ -387,12 +526,12 @@ class ProviderGUI(ctk.CTk):
                     ))
                     print("[STARTUP] Probing complete.")
 
-                # 2. Start solo.py
-                self.after(0, self._actual_start_service)
+                # 2. Start solo.py via main thread
+                self.signals.trigger_actual_start.emit()
 
             except Exception as e:
                 print(f"[STARTUP] Error during startup orchestration: {e}")
-                self.after(0, self._update_ui_stopped)
+                self.signals.ui_state_signal.emit("stopped")
 
         threading.Thread(target=_startup_logic, daemon=True).start()
 
@@ -421,7 +560,7 @@ class ProviderGUI(ctk.CTk):
             def check_startup():
                 for _ in range(50):
                     if self._server_process and self._server_process.poll() is None:
-                        self.after(0, self._update_ui_started)
+                        self.signals.ui_state_signal.emit("started")
                         return
                     if self._stop_event.is_set():
                         return
@@ -430,13 +569,13 @@ class ProviderGUI(ctk.CTk):
             threading.Thread(target=check_startup, daemon=True).start()
         except Exception as e:
             print(f"Error starting provider: {e}")
-            self._update_ui_stopped()
+            self.signals.ui_state_signal.emit("stopped")
 
     def stop_service(self):
         if self._server_process is not None:
             self._stop_event.set()
             self._server_process.terminate()
-            self._update_ui_stopping()
+            self.signals.ui_state_signal.emit("stopping")
 
             def wait_join():
                 try:
@@ -448,39 +587,18 @@ class ProviderGUI(ctk.CTk):
                     self._server_process.wait()
                 
                 self._server_process = None
-                self.after(0, self._update_ui_stopped)
+                self.signals.ui_state_signal.emit("stopped")
 
             threading.Thread(target=wait_join, daemon=True).start()
         else:
-            self._update_ui_stopped()
-
-    def _update_ui_started(self):
-        self.start_btn.configure(state="disabled", fg_color="#d1d1d6")
-        self.stop_btn.configure(state="normal", fg_color="#ff3b30", hover_color="#ff2d55")
-        self.status_text.configure(text="SYSTEM RUNNING", text_color="#34c759")
-        self.status_dot.configure(text_color="#34c759")
-
-    def _update_ui_probing(self):
-        self.status_text.configure(text="SYSTEM PROBING", text_color="#3498db")
-        self.status_dot.configure(text_color="#3498db")
-
-    def _update_ui_stopping(self):
-        self.stop_btn.configure(state="disabled", fg_color="#d1d1d6")
-        self.status_text.configure(text="FINISHING JOBS", text_color="#f39c12")
-        self.status_dot.configure(text_color="#f39c12")
-
-    def _update_ui_stopped(self):
-        self.start_btn.configure(state="normal", fg_color="#34c759", hover_color="#30d158")
-        self.stop_btn.configure(state="disabled", fg_color="#e5e5ea")
-        self.status_text.configure(text="SYSTEM STOPPED", text_color="#86868b")
-        self.status_dot.configure(text_color="#ff3b30")
+            self.signals.ui_state_signal.emit("stopped")
 
     # ── config ──────────────────────────────────────────────────
     def save_config(self):
-        new_id = self.provider_id_entry.get().strip()
-        new_models_path = self.models_path_entry.get().strip()
-        new_storage = self.storage_entry.get().strip()
-        new_auto = "yes" if self.auto_manage_cb.get() else "no"
+        new_id = self.provider_id_entry.text().strip()
+        new_models_path = self.models_path_entry.text().strip()
+        new_storage = self.storage_entry.text().strip()
+        new_auto = "yes" if self.auto_manage_cb.isChecked() else "no"
 
         errors = []
         if not new_id:
@@ -492,7 +610,7 @@ class ProviderGUI(ctk.CTk):
             errors.append("Managed Model Storage must be a number")
 
         if errors:
-            messagebox.showwarning("Configuration Error", "\n".join(errors))
+            QMessageBox.warning(self, "Configuration Error", "\n".join(errors))
             return
 
         try:
@@ -510,11 +628,55 @@ class ProviderGUI(ctk.CTk):
                 config.write(f)
             
             self.restart_ollama_server()
-            messagebox.showinfo("Success", "Settings saved and Ollama server restarted!")
+            QMessageBox.information(self, "Success", "Settings saved and Ollama server restarted!")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to save settings: {e}")
+            QMessageBox.critical(self, "Error", f"Failed to save settings: {e}")
 
-    def on_closing(self):
+    # ── system tray ─────────────────────────────────────────────
+    def setup_tray(self):
+        """Initialize the system tray icon and its context menu."""
+        self.tray_icon = QSystemTrayIcon(self)
+        
+        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thinkfarm.webp")
+        if os.path.exists(logo_path):
+            self.tray_icon.setIcon(QIcon(logo_path))
+        else:
+            self.tray_icon.setIcon(self.style().standardIcon(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps))
+
+        self.tray_menu = QMenu()
+        
+        restore_action = QAction("Restore", self)
+        restore_action.triggered.connect(self.restore_window)
+        self.tray_menu.addAction(restore_action)
+        
+        self.tray_menu.addSeparator()
+        
+        exit_action = QAction("Exit", self)
+        exit_action.triggered.connect(self.close)
+        self.tray_menu.addAction(exit_action)
+        
+        self.tray_icon.setContextMenu(self.tray_menu)
+        self.tray_icon.activated.connect(self._on_tray_icon_activated)
+        self.tray_icon.show()
+
+    def _on_tray_icon_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.restore_window()
+
+    def restore_window(self):
+        self.show()
+        self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
+        self.activateWindow()
+
+    def changeEvent(self, event):
+        if event.type() == event.Type.WindowStateChange:
+            if self.isMinimized():
+                if QSystemTrayIcon.isSystemTrayAvailable():
+                    # Hide to tray
+                    QTimer.singleShot(0, self.hide)
+        super().changeEvent(event)
+
+    def closeEvent(self, event):
         if self._server_process is not None:
             self.stop_service()
             
@@ -530,8 +692,7 @@ class ProviderGUI(ctk.CTk):
                 self._ollama_log_file.close()
             except Exception:
                 pass
-                
-        self.destroy()
+        event.accept()
 
 
 if __name__ == "__main__":
@@ -546,6 +707,15 @@ if __name__ == "__main__":
             context_prober.main(sys.argv[2:])
             sys.exit(0)
 
-    app = ProviderGUI()
-    app.protocol("WM_DELETE_WINDOW", app.on_closing)
-    app.mainloop()
+    app = QApplication(sys.argv)
+    
+    font = QFont("Inter")
+    if not font.exactMatch():
+        font = QFont("Ubuntu")
+    if not font.exactMatch():
+        font = QFont("Segoe UI")
+    app.setFont(font)
+
+    window = ProviderGUI()
+    window.show()
+    sys.exit(app.exec())
