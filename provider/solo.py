@@ -406,9 +406,11 @@ async def handle_job_published(websocket, data: dict):
 async def execute_job(websocket, data: dict):
     global is_busy
     is_busy += 1
+    job_id = data.get("job_id")
+    print(f"Received job {job_id} (queued/active count: {is_busy})")
     try:
         async with execution_lock:
-            job_id = data.get("job_id")
+            print(f"Starting job {job_id}")
             endpoint_key = data.get("endpoint", "chat")
             body = data.get("body", {})
             ollama_path = _ENDPOINT_MAP.get(endpoint_key, "/api/chat")
@@ -499,6 +501,7 @@ async def execute_job(websocket, data: dict):
                             "prompt_eval_count": prompt_eval_count,
                             "eval_count": eval_count,
                             "total_duration": total_duration,
+                            "is_busy": is_busy > 1,
                         }
                     )
                 )
@@ -514,6 +517,7 @@ async def execute_job(websocket, data: dict):
                             "prompt_eval_count": 0,
                             "eval_count": 0,
                             "total_duration": 0,
+                            "is_busy": is_busy > 1,
                         }
                     )
                 )

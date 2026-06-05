@@ -126,6 +126,9 @@ class OllamaClient:
         """
         try:
             response = await self.httpx_client.request("DELETE", "/api/delete", json={"name": model_name})
+            if response.status_code == 404:
+                print(f"[OllamaClient] Model {model_name} not found on server; treating as deleted.")
+                return True
             response.raise_for_status()
             return True
         except Exception as e:

@@ -14,17 +14,14 @@ WORKDIR /app
 
 # Copy requirements and install
 # We remove customtkinter as it's a GUI library and not needed for a headless container
-COPY provider/requirements.txt .
+COPY requirements.txt .
 RUN sed -i '/customtkinter/d' requirements.txt && \
     pip3 install --no-cache-dir -r requirements.txt --break-system-packages
 
-# Copy the provider source
-# We copy everything in provider/ to /app/provider/
-# solo.py and headless.py will be at /app/provider/
-COPY provider/ /app/provider/
+# Copy the provider source to /app/
+COPY . /app/
 
-# Copy entrypoint script and make it executable
-COPY provider/entrypoint.sh /app/entrypoint.sh
+# Make entrypoint script executable
 RUN chmod +x /app/entrypoint.sh
 
 # Environment variables with defaults
