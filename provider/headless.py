@@ -279,19 +279,21 @@ def cmd_start():
 
     # 5. Wait for the process or Ctrl-C
     try:
-        while _server_process is not None and _server_process.poll() is None:
+        while not _shutdown_requested:
+            if _server_process is not None:
+                rc = _server_process.poll()
+                if rc is not None:
+                    if not _stop_event.is_set():
+                        print(f"\nsolo.py exited with code {rc}")
+                        print("\n\nServer process ended unexpectedly.")
+                        break
             time.sleep(1)
-        if _server_process is not None:
-            rc = _server_process.returncode
-            print(f"\nsolo.py exited with code {rc}")
     except KeyboardInterrupt:
         print("\n\nReceived interrupt. Shutting down...")
         if _server_process is not None:
             _stop_service_sync()
         _remove_pid()
         _shutdown_requested = True
-    else:
-        print("\n\nServer process ended unexpectedly.")
 
 
 def cmd_stop():
