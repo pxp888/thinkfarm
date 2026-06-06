@@ -18,7 +18,7 @@ import socket
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QCheckBox, QFrame, QGridLayout, QMessageBox,
-    QSystemTrayIcon, QMenu
+    QSystemTrayIcon, QMenu, QStyle
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal as Signal, QObject
 from PyQt6.QtGui import QFont, QPixmap, QIcon, QAction
@@ -656,7 +656,7 @@ class ProviderGUI(QMainWindow):
         if os.path.exists(logo_path):
             self.tray_icon.setIcon(QIcon(logo_path))
         else:
-            self.tray_icon.setIcon(self.style().standardIcon(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps))
+            self.tray_icon.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
 
         self.tray_menu = QMenu()
         

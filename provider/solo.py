@@ -169,10 +169,6 @@ active_tasks: dict = {}
 status_update_event: asyncio.Event | None = None
 
 
-def trigger_status_update():
-    if status_update_event is not None:
-        status_update_event.set()
-
 
 
 # ---------------------------------------------------------------------------
@@ -312,44 +308,44 @@ async def send_initial_status(websocket):
     await websocket.send(json.dumps({"type": "status", **status}))
 
 
-async def _get_changed_status():
-    status = await get_provider_status()
-    if status is None:
-        return None
-    current = {
-        "models": frozenset(
-            (m.get("name") if isinstance(m, dict) else m)
-            for m in status.get("models", [])
-        ),
-        "loaded_models": frozenset(
-            (m.get("name") if isinstance(m, dict) else m)
-            for m in status.get("loaded_models", [])
-        ),
-    }
-    if _previous_status is None or current != _previous_status:
-        return status
-    return None
+# async def _get_changed_status():
+#     status = await get_provider_status()
+#     if status is None:
+#         return None
+#     current = {
+#         "models": frozenset(
+#             (m.get("name") if isinstance(m, dict) else m)
+#             for m in status.get("models", [])
+#         ),
+#         "loaded_models": frozenset(
+#             (m.get("name") if isinstance(m, dict) else m)
+#             for m in status.get("loaded_models", [])
+#         ),
+#     }
+#     if _previous_status is None or current != _previous_status:
+#         return status
+#     return None
 
 
-async def _get_changed_loaded_status() -> dict | None:
-    status = await get_loaded_models_only()
-    if status is None:
-        return None
-    current = {
-        "loaded_models": frozenset(
-            (m.get("name") if isinstance(m, dict) else m)
-            for m in status.get("loaded_models", [])
-        ),
-    }
-    if (
-        _previous_status is None
-        or current.get("loaded_models") != _previous_status.get("loaded_models")
-        or (is_busy > 0) != _previous_status.get("is_busy")
-    ):
-        status["models"] = _cached_full_models
-        status["is_busy"] = is_busy > 0
-        return status
-    return None
+# async def _get_changed_loaded_status() -> dict | None:
+#     status = await get_loaded_models_only()
+#     if status is None:
+#         return None
+#     current = {
+#         "loaded_models": frozenset(
+#             (m.get("name") if isinstance(m, dict) else m)
+#             for m in status.get("loaded_models", [])
+#         ),
+#     }
+#     if (
+#         _previous_status is None
+#         or current.get("loaded_models") != _previous_status.get("loaded_models")
+#         or (is_busy > 0) != _previous_status.get("is_busy")
+#     ):
+#         status["models"] = _cached_full_models
+#         status["is_busy"] = is_busy > 0
+#         return status
+#     return None
 
 
 async def periodic_status_updates(websocket):
@@ -580,7 +576,8 @@ async def execute_job(websocket, data: dict):
                 )
     finally:
         is_busy -= 1
-        trigger_status_update()
+        if status_update_event is not None:
+            status_update_event.set()
 
 
 async def execute_job_with_heartbeat_reset(websocket, data: dict):
