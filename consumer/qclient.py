@@ -98,29 +98,34 @@ class QConsumerGUI(QMainWindow):
         # UI Stylesheet to mimic customtkinter theme
         self.setStyleSheet("""
             QMainWindow {
-                background-color: #f5f5f7;
+                background-color: #ffffff;
             }
             QLabel {
-                color: #1d1d1f;
+                color: #1c1c1e;
                 font-family: "Inter", "Ubuntu", "Segoe UI", sans-serif;
             }
             QLineEdit {
                 background-color: #f5f5f7;
-                border: 1px solid #d2d2d7;
+                border: 1px solid transparent;
                 border-radius: 0px;
                 padding: 8px;
-                color: #1d1d1f;
+                color: #1c1c1e;
                 font-family: "JetBrains Mono", "Fira Code", "Monospace";
             }
+            QLineEdit:focus {
+                background-color: #ffffff;
+                border-color: #548889;
+                border: 1px solid #548889;
+            }
             QCheckBox {
-                color: #1d1d1f;
+                color: #1c1c1e;
                 font-family: "Inter", "Ubuntu", sans-serif;
                 font-size: 13px;
             }
             QScrollArea {
-                border: 1px solid #d2d2d7;
+                border: 1px solid rgba(0, 0, 0, 0.1);
                 border-radius: 0px;
-                background-color: #f5f5f7;
+                background-color: #ffffff;
             }
         """)
 
@@ -133,7 +138,7 @@ class QConsumerGUI(QMainWindow):
         # Sidebar - Pure Black
         self.sidebar_frame = QFrame()
         self.sidebar_frame.setFixedWidth(240)
-        self.sidebar_frame.setStyleSheet("background-color: #e6e6e6; border: none;")
+        self.sidebar_frame.setStyleSheet("background-color: #f7f7f8; border: none;")
         sidebar_layout = QVBoxLayout(self.sidebar_frame)
         sidebar_layout.setContentsMargins(25, 40, 25, 20)
         sidebar_layout.setSpacing(10)
@@ -159,15 +164,12 @@ class QConsumerGUI(QMainWindow):
         self.start_btn.setFixedHeight(45)
         self.start_btn.setStyleSheet("""
             QPushButton {
-                background-color: #10b981;
+                background-color: #548889;
                 color: white;
                 border-radius: 0px;
-                font-weight: bold;
+                font-weight: 500;
                 font-size: 14px;
                 border: none;
-            }
-            QPushButton:hover {
-                background-color: #059669;
             }
             QPushButton:disabled {
                 background-color: #d2d2d7;
@@ -182,15 +184,15 @@ class QConsumerGUI(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.stop_btn.setStyleSheet("""
             QPushButton {
-                background-color: #8e8e93;
+                background-color: #6b7280;
                 color: white;
                 border-radius: 0px;
-                font-weight: bold;
+                font-weight: 500;
                 font-size: 14px;
                 border: none;
             }
             QPushButton:hover {
-                background-color: #636366;
+                background-color: #4b5563;
             }
             QPushButton:disabled {
                 background-color: #d2d2d7;
@@ -202,8 +204,8 @@ class QConsumerGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Client v10")
-        self.info_label.setStyleSheet("color: #666666; font-size: 11px;")
+        self.info_label = QLabel("Client v11")
+        self.info_label.setStyleSheet("color: #8e8e93; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
 
@@ -222,7 +224,7 @@ class QConsumerGUI(QMainWindow):
             QFrame#ConfigCard {
                 background-color: #ffffff;
                 border-radius: 0px;
-                border: 1px solid #e5e5e7;
+                border: 1px solid rgba(0, 0, 0, 0.1);
             }
         """)
         self.config_card.setObjectName("ConfigCard")
@@ -237,7 +239,7 @@ class QConsumerGUI(QMainWindow):
         grid_layout.setSpacing(10)
         
         self.id_label = QLabel("Client Identifier")
-        self.id_label.setStyleSheet("color: #86868b; font-size: 13px; border: none;")
+        self.id_label.setStyleSheet("color: rgba(0, 0, 0, 0.4); font-size: 13px; border: none;")
         grid_layout.addWidget(self.id_label, 0, 0)
         
         self.consumer_id_entry = QLineEdit()
@@ -245,11 +247,11 @@ class QConsumerGUI(QMainWindow):
         grid_layout.addWidget(self.consumer_id_entry, 0, 1)
 
         self.consumer_id_status = QLabel("")
-        self.consumer_id_status.setStyleSheet("font-size: 10px; color: #555555; border: none;")
+        self.consumer_id_status.setStyleSheet("font-size: 10px; color: #8e8e93; border: none;")
         grid_layout.addWidget(self.consumer_id_status, 1, 1, Qt.AlignmentFlag.AlignRight)
 
         self.port_label = QLabel("Local Server Port")
-        self.port_label.setStyleSheet("color: #86868b; font-size: 13px; border: none;")
+        self.port_label.setStyleSheet("color: rgba(0, 0, 0, 0.4); font-size: 13px; border: none;")
         grid_layout.addWidget(self.port_label, 2, 0)
         
         self.server_port_entry = QLineEdit()
@@ -257,7 +259,7 @@ class QConsumerGUI(QMainWindow):
         grid_layout.addWidget(self.server_port_entry, 2, 1)
 
         self.server_port_status = QLabel("")
-        self.server_port_status.setStyleSheet("font-size: 10px; color: #555555; border: none;")
+        self.server_port_status.setStyleSheet("font-size: 10px; color: #8e8e93; border: none;")
         grid_layout.addWidget(self.server_port_status, 3, 1, Qt.AlignmentFlag.AlignRight)
 
         config_card_layout.addLayout(grid_layout)
@@ -265,7 +267,7 @@ class QConsumerGUI(QMainWindow):
         # Whitelist Section Header
         wl_header_layout = QHBoxLayout()
         self.wl_title = QLabel("Model Whitelist")
-        self.wl_title.setStyleSheet("font-size: 18px; font-weight: 500; border: none;")
+        self.wl_title.setStyleSheet("font-size: 18px; font-weight: 500; border: none; color: #1c1c1e;")
         wl_header_layout.addWidget(self.wl_title)
         
         wl_header_layout.addStretch()
@@ -274,36 +276,41 @@ class QConsumerGUI(QMainWindow):
         self.refresh_btn.setFixedSize(120, 28)
         self.refresh_btn.setStyleSheet("""
             QPushButton {
-                background-color: #f5f5f7;
-                border: 1px solid #d2d2d7;
+                background-color: transparent;
+                border: 1px solid rgba(0, 0, 0, 0.1);
                 border-radius: 0px;
                 font-size: 11px;
-                font-weight: bold;
-                color: #1d1d1f;
+                font-weight: 500;
+                color: #8e8e93;
             }
-            QPushButton:hover { background-color: #e5e5e7; }
+            QPushButton:hover {
+                background-color: rgba(84, 136, 137, 0.08);
+                color: #548889;
+            }
         """)
         self.refresh_btn.clicked.connect(self.refresh_models)
         wl_header_layout.addWidget(self.refresh_btn)
         config_card_layout.addLayout(wl_header_layout)
 
         self.whitelist_enabled_cb = QCheckBox("Enable Model Whitelisting")
+        self.whitelist_enabled_cb.setStyleSheet("color: #1c1c1e; font-size: 13px;")
         config_card_layout.addWidget(self.whitelist_enabled_cb)
 
         # Filter
         filter_layout = QHBoxLayout()
         self.filter_icon = QLabel("🔍")
-        self.filter_icon.setStyleSheet("border: none; color: #86868b;")
+        self.filter_icon.setStyleSheet("border: none; color: rgba(0, 0, 0, 0.4);")
         filter_layout.addWidget(self.filter_icon)
         
         self.filter_entry = QLineEdit()
         self.filter_entry.setPlaceholderText("Filter models...")
         self.filter_entry.setStyleSheet("""
             QLineEdit {
-                background-color: #ffffff;
-                border: 1px solid #d2d2d7;
+                background-color: #f5f5f7;
+                border: 1px solid transparent;
                 border-radius: 0px;
                 height: 32px;
+                padding: 6px 10px;
             }
         """)
         self.filter_entry.textChanged.connect(self.apply_model_filter)
@@ -314,20 +321,23 @@ class QConsumerGUI(QMainWindow):
         toggle_layout = QHBoxLayout()
         toggle_layout.addStretch()
         
-        self.select_none_btn = QPushButton("Select None")
-        self.select_all_btn = QPushButton("Select All")
+        self.select_none_btn = QPushButton("None")
+        self.select_all_btn = QPushButton("All")
         for btn in [self.select_none_btn, self.select_all_btn]:
-            btn.setFixedSize(110, 28)
+            btn.setFixedSize(60, 28)
             btn.setStyleSheet("""
                 QPushButton {
-                    background-color: #f5f5f7;
-                    border: 1px solid #d2d2d7;
+                    background-color: transparent;
+                    border: 1px solid rgba(0, 0, 0, 0.1);
                     border-radius: 0px;
                     font-size: 11px;
-                    font-weight: bold;
-                    color: #1d1d1f;
+                    font-weight: 500;
+                    color: #8e8e93;
                 }
-                QPushButton:hover { background-color: #e5e5e7; }
+                QPushButton:hover {
+                    background-color: rgba(84, 136, 137, 0.08);
+                    color: #548889;
+                }
             """)
         self.select_all_btn.clicked.connect(self.select_all_models)
         self.select_none_btn.clicked.connect(self.select_none_models)
@@ -340,7 +350,7 @@ class QConsumerGUI(QMainWindow):
         self.scroll_area.setWidgetResizable(True)
         # self.scroll_area.setFixedHeight(200)
         self.models_widget = QWidget()
-        self.models_widget.setStyleSheet("background-color: #f5f5f7;")
+        self.models_widget.setStyleSheet("background-color: #ececec;")
         self.models_layout = QVBoxLayout(self.models_widget)
         self.models_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll_area.setWidget(self.models_widget)
@@ -354,14 +364,14 @@ class QConsumerGUI(QMainWindow):
         self.save_all_btn.setFixedSize(160, 40)
         self.save_all_btn.setStyleSheet("""
             QPushButton {
-                background-color: #8e8e93;
+                background-color: #2d2d2d;
                 color: white;
                 border-radius: 0px;
-                font-weight: bold;
+                font-weight: 500;
                 font-size: 14px;
                 border: none;
             }
-            QPushButton:hover { background-color: #636366; }
+            QPushButton:hover { background-color: #548889; }
         """)
         self.save_all_btn.clicked.connect(self.save_all_settings)
         save_btn_layout.addWidget(self.save_all_btn)
@@ -373,7 +383,7 @@ class QConsumerGUI(QMainWindow):
         # Status Bar
         self.status_bar_frame = QFrame()
         self.status_bar_frame.setFixedHeight(50)
-        self.status_bar_frame.setStyleSheet("background-color: #ffffff; border: 1px solid #e5e5e7; border-radius: 0px;")
+        self.status_bar_frame.setStyleSheet("background-color: #ffffff; border-top: 1px solid rgba(0, 0, 0, 0.1); border-radius: 0px;")
         status_bar_layout = QHBoxLayout(self.status_bar_frame)
         status_bar_layout.setContentsMargins(20, 0, 20, 0)
         
@@ -382,7 +392,7 @@ class QConsumerGUI(QMainWindow):
         status_bar_layout.addWidget(self.status_dot)
 
         self.status_text = QLabel("SYSTEM STOPPED")
-        self.status_text.setStyleSheet("color: #86868b; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
+        self.status_text.setStyleSheet("color: #8e8e93; font-size: 12px; font-weight: 600; border: none; margin-left: 5px;")
         status_bar_layout.addWidget(self.status_text)
         status_bar_layout.addStretch()
 
@@ -425,7 +435,7 @@ class QConsumerGUI(QMainWindow):
                 continue
             
             cb = QCheckBox(name)
-            cb.setStyleSheet("margin: 5px; border: none;")
+            cb.setStyleSheet("margin: 5px; border: none; color: #1c1c1e; font-size: 13px;")
             self.model_vars[name] = cb
             self.models_layout.addWidget(cb)
             cb.show()
@@ -493,7 +503,7 @@ class QConsumerGUI(QMainWindow):
                 config.write(f)
             
             self.server_port_status.setText("Settings saved!")
-            self.server_port_status.setStyleSheet("color: #2ecc71; font-size: 10px; border: none;")
+            self.server_port_status.setStyleSheet("color: #548889; font-size: 10px; border: none;")
         except Exception as e:
             print(f"Error saving whitelist: {e}")
 
@@ -566,7 +576,7 @@ class QConsumerGUI(QMainWindow):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.status_text.setText("SYSTEM RUNNING")
-        self.status_text.setStyleSheet("color: #34c759; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
+        self.status_text.setStyleSheet("color: #34c759; font-size: 12px; font-weight: 600; border: none; margin-left: 5px;")
         self.status_dot.setStyleSheet("color: #34c759; font-size: 22px; border: none;")
 
     def stop_service(self):
@@ -586,7 +596,7 @@ class QConsumerGUI(QMainWindow):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.status_text.setText("SYSTEM STOPPED")
-        self.status_text.setStyleSheet("color: #86868b; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
+        self.status_text.setStyleSheet("color: #8e8e93; font-size: 12px; font-weight: 600; border: none; margin-left: 5px;")
         self.status_dot.setStyleSheet("color: #8e8e93; font-size: 22px; border: none;")
 
     def load_consumer_id(self):
@@ -634,7 +644,7 @@ class QConsumerGUI(QMainWindow):
                 config.write(f)
 
             self.consumer_id_status.setText("Client ID saved!")
-            self.consumer_id_status.setStyleSheet("color: #2ecc71; font-size: 10px; border: none;")
+            self.consumer_id_status.setStyleSheet("color: #548889; font-size: 10px; border: none;")
         except Exception as e:
             self.consumer_id_status.setText(f"Error saving: {e}")
 
@@ -675,7 +685,7 @@ class QConsumerGUI(QMainWindow):
                 config.write(f)
 
             self.server_port_status.setText("Port saved!")
-            self.server_port_status.setStyleSheet("color: #2ecc71; font-size: 10px; border: none;")
+            self.server_port_status.setStyleSheet("color: #548889; font-size: 10px; border: none;")
         except Exception as e:
             self.server_port_status.setText(f"Error saving: {e}")
 

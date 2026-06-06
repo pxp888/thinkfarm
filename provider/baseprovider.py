@@ -139,22 +139,27 @@ class ProviderGUI(QMainWindow):
     def setup_ui(self):
         self.setStyleSheet("""
             QMainWindow {
-                background-color: #f5f5f7;
+                background-color: #ffffff;
             }
             QLabel {
-                color: #1d1d1f;
+                color: #1c1c1e;
                 font-family: "Inter", "Ubuntu", "Segoe UI", sans-serif;
             }
             QLineEdit {
                 background-color: #f5f5f7;
-                border: 1px solid #d2d2d7;
+                border: 1px solid transparent;
                 border-radius: 0px;
                 padding: 8px;
-                color: #1d1d1f;
+                color: #1c1c1e;
                 font-family: "JetBrains Mono", "Fira Code", "Monospace";
             }
+            QLineEdit:focus {
+                background-color: #ffffff;
+                border-color: #548889;
+                border: 1px solid #548889;
+            }
             QCheckBox {
-                color: #1d1d1f;
+                color: #1c1c1e;
                 font-family: "Inter", "Ubuntu", sans-serif;
                 font-size: 13px;
             }
@@ -169,7 +174,7 @@ class ProviderGUI(QMainWindow):
         # Sidebar - Light Grey
         self.sidebar_frame = QFrame()
         self.sidebar_frame.setFixedWidth(240)
-        self.sidebar_frame.setStyleSheet("background-color: #e6e6e6; border: none;")
+        self.sidebar_frame.setStyleSheet("background-color: #f7f7f8; border: none;")
         sidebar_layout = QVBoxLayout(self.sidebar_frame)
         sidebar_layout.setContentsMargins(25, 40, 25, 20)
         sidebar_layout.setSpacing(10)
@@ -195,18 +200,15 @@ class ProviderGUI(QMainWindow):
         self.start_btn.setFixedHeight(45)
         self.start_btn.setStyleSheet("""
             QPushButton {
-                background-color: #2ecc71;
+                background-color: #548889;
                 color: white;
                 border-radius: 0px;
-                font-weight: bold;
+                font-weight: 500;
                 font-size: 14px;
                 border: none;
             }
-            QPushButton:hover {
-                background-color: #27ae60;
-            }
             QPushButton:disabled {
-                background-color: #d1d1d6;
+                background-color: #d2d2d7;
                 color: #8e8e93;
             }
         """)
@@ -218,18 +220,18 @@ class ProviderGUI(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.stop_btn.setStyleSheet("""
             QPushButton {
-                background-color: #333333;
+                background-color: #6b7280;
                 color: white;
                 border-radius: 0px;
-                font-weight: bold;
+                font-weight: 500;
                 font-size: 14px;
                 border: none;
             }
             QPushButton:hover {
-                background-color: #e74c3c;
+                background-color: #4b5563;
             }
             QPushButton:disabled {
-                background-color: #d1d1d6;
+                background-color: #d2d2d7;
                 color: #8e8e93;
             }
         """)
@@ -238,7 +240,7 @@ class ProviderGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Provider v17")
+        self.info_label = QLabel("Provider v18")
         self.info_label.setStyleSheet("color: #666666; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -258,7 +260,7 @@ class ProviderGUI(QMainWindow):
             QFrame#ConfigCard {
                 background-color: #ffffff;
                 border-radius: 0px;
-                border: 1px solid #e5e5e7;
+                border: 1px solid rgba(0, 0, 0, 0.1);
             }
         """)
         self.config_card.setObjectName("ConfigCard")
@@ -271,7 +273,7 @@ class ProviderGUI(QMainWindow):
         grid_layout.setSpacing(15)
 
         self.provider_id_label = QLabel("Provider Identifier")
-        self.provider_id_label.setStyleSheet("color: #86868b; font-size: 13px; border: none;")
+        self.provider_id_label.setStyleSheet("color: rgba(0, 0, 0, 0.4); font-size: 13px; border: none;")
         grid_layout.addWidget(self.provider_id_label, 0, 0)
 
         self.provider_id_entry = QLineEdit()
@@ -279,7 +281,7 @@ class ProviderGUI(QMainWindow):
         grid_layout.addWidget(self.provider_id_entry, 0, 1)
 
         self.ollama_url_label = QLabel("Ollama URL")
-        self.ollama_url_label.setStyleSheet("color: #86868b; font-size: 13px; border: none;")
+        self.ollama_url_label.setStyleSheet("color: rgba(0, 0, 0, 0.4); font-size: 13px; border: none;")
         grid_layout.addWidget(self.ollama_url_label, 1, 0)
 
         self.ollama_url_entry = QLineEdit()
@@ -287,11 +289,11 @@ class ProviderGUI(QMainWindow):
         grid_layout.addWidget(self.ollama_url_entry, 1, 1)
 
         self.auto_manage_cb = QCheckBox("Manage models automatically")
-        self.auto_manage_cb.setStyleSheet("color: #86868b; font-size: 13px; border: none;")
+        self.auto_manage_cb.setStyleSheet("color: #1c1c1e; font-size: 13px; border: none;")
         grid_layout.addWidget(self.auto_manage_cb, 2, 1)
 
         self.storage_label = QLabel("Managed Model Storage (GB)")
-        self.storage_label.setStyleSheet("color: #86868b; font-size: 13px; border: none;")
+        self.storage_label.setStyleSheet("color: rgba(0, 0, 0, 0.4); font-size: 13px; border: none;")
         grid_layout.addWidget(self.storage_label, 3, 0)
 
         self.storage_entry = QLineEdit()
@@ -308,14 +310,14 @@ class ProviderGUI(QMainWindow):
         self.save_btn.setFixedSize(160, 40)
         self.save_btn.setStyleSheet("""
             QPushButton {
-                background-color: #8e8e93;
+                background-color: #2d2d2d;
                 color: white;
                 border-radius: 0px;
-                font-weight: bold;
+                font-weight: 500;
                 font-size: 14px;
                 border: none;
             }
-            QPushButton:hover { background-color: #636366; }
+            QPushButton:hover { background-color: #548889; }
         """)
         self.save_btn.clicked.connect(self.save_config)
         save_btn_layout.addWidget(self.save_btn)
@@ -326,16 +328,16 @@ class ProviderGUI(QMainWindow):
         # Status Bar
         self.status_bar_frame = QFrame()
         self.status_bar_frame.setFixedHeight(50)
-        self.status_bar_frame.setStyleSheet("background-color: #ffffff; border: 1px solid #e5e5e7; border-radius: 0px;")
+        self.status_bar_frame.setStyleSheet("background-color: #ffffff; border-top: 1px solid rgba(0, 0, 0, 0.1); border-radius: 0px;")
         status_bar_layout = QHBoxLayout(self.status_bar_frame)
         status_bar_layout.setContentsMargins(20, 0, 20, 0)
 
         self.status_dot = QLabel("●")
-        self.status_dot.setStyleSheet("color: #ff3b30; font-size: 22px; border: none;")
+        self.status_dot.setStyleSheet("color: #8e8e93; font-size: 22px; border: none;")
         status_bar_layout.addWidget(self.status_dot)
 
         self.status_text = QLabel("SYSTEM STOPPED")
-        self.status_text.setStyleSheet("color: #86868b; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
+        self.status_text.setStyleSheet("color: #8e8e93; font-size: 12px; font-weight: 600; border: none; margin-left: 5px;")
         status_bar_layout.addWidget(self.status_text)
         status_bar_layout.addStretch()
 
@@ -345,30 +347,30 @@ class ProviderGUI(QMainWindow):
     def _handle_ui_state_change(self, state):
         if state == "started":
             self.start_btn.setEnabled(False)
-            self.start_btn.setStyleSheet("QPushButton { background-color: #d1d1d6; color: #8e8e93; border: none; font-weight: bold; font-size: 14px; }")
+            self.start_btn.setStyleSheet("QPushButton { background-color: #d2d2d7; color: #8e8e93; border: none; font-weight: 500; font-size: 14px; }")
             self.stop_btn.setEnabled(True)
-            self.stop_btn.setStyleSheet("QPushButton { background-color: #ff3b30; color: white; border: none; font-weight: bold; font-size: 14px; } QPushButton:hover { background-color: #ff2d55; }")
+            self.stop_btn.setStyleSheet("QPushButton { background-color: #6b7280; color: white; border: none; font-weight: 500; font-size: 14px; } QPushButton:hover { background-color: #4b5563; }")
             self.status_text.setText("SYSTEM RUNNING")
-            self.status_text.setStyleSheet("color: #34c759; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
+            self.status_text.setStyleSheet("color: #34c759; font-size: 12px; font-weight: 600; border: none; margin-left: 5px;")
             self.status_dot.setStyleSheet("color: #34c759; font-size: 22px; border: none;")
         elif state == "probing":
             self.status_text.setText("SYSTEM PROBING")
-            self.status_text.setStyleSheet("color: #3498db; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
+            self.status_text.setStyleSheet("color: #3498db; font-size: 12px; font-weight: 600; border: none; margin-left: 5px;")
             self.status_dot.setStyleSheet("color: #3498db; font-size: 22px; border: none;")
         elif state == "stopping":
             self.stop_btn.setEnabled(False)
-            self.stop_btn.setStyleSheet("QPushButton { background-color: #d1d1d6; color: #8e8e93; border: none; font-weight: bold; font-size: 14px; }")
+            self.stop_btn.setStyleSheet("QPushButton { background-color: #d2d2d7; color: #8e8e93; border: none; font-weight: 500; font-size: 14px; }")
             self.status_text.setText("FINISHING JOBS")
-            self.status_text.setStyleSheet("color: #f39c12; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
+            self.status_text.setStyleSheet("color: #f39c12; font-size: 12px; font-weight: 600; border: none; margin-left: 5px;")
             self.status_dot.setStyleSheet("color: #f39c12; font-size: 22px; border: none;")
         elif state == "stopped":
             self.start_btn.setEnabled(True)
-            self.start_btn.setStyleSheet("QPushButton { background-color: #34c759; color: white; border: none; font-weight: bold; font-size: 14px; } QPushButton:hover { background-color: #30d158; }")
+            self.start_btn.setStyleSheet("QPushButton { background-color: #548889; color: white; border: none; font-weight: 500; font-size: 14px; }")
             self.stop_btn.setEnabled(False)
-            self.stop_btn.setStyleSheet("QPushButton { background-color: #e5e5ea; color: #8e8e93; border: none; font-weight: bold; font-size: 14px; }")
+            self.stop_btn.setStyleSheet("QPushButton { background-color: #d2d2d7; color: #8e8e93; border: none; font-weight: 500; font-size: 14px; }")
             self.status_text.setText("SYSTEM STOPPED")
-            self.status_text.setStyleSheet("color: #86868b; font-size: 12px; font-weight: bold; border: none; margin-left: 5px;")
-            self.status_dot.setStyleSheet("color: #ff3b30; font-size: 22px; border: none;")
+            self.status_text.setStyleSheet("color: #8e8e93; font-size: 12px; font-weight: 600; border: none; margin-left: 5px;")
+            self.status_dot.setStyleSheet("color: #8e8e93; font-size: 22px; border: none;")
 
     def _handle_show_message(self, msg_type, title, message):
         if msg_type == "info":
