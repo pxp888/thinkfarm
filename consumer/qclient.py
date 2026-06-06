@@ -204,7 +204,7 @@ class QConsumerGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Client v11")
+        self.info_label = QLabel("Client v12")
         self.info_label.setStyleSheet("color: #8e8e93; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -364,14 +364,13 @@ class QConsumerGUI(QMainWindow):
         self.save_all_btn.setFixedSize(160, 40)
         self.save_all_btn.setStyleSheet("""
             QPushButton {
-                background-color: #2d2d2d;
+                background-color: #548889;
                 color: white;
                 border-radius: 0px;
                 font-weight: 500;
                 font-size: 14px;
                 border: none;
             }
-            QPushButton:hover { background-color: #548889; }
         """)
         self.save_all_btn.clicked.connect(self.save_all_settings)
         save_btn_layout.addWidget(self.save_all_btn)

@@ -95,8 +95,60 @@ stopping: bool = False                 # Graceful shutdown flag
 my_models: set = set()                 # names of all Ollama models on this machine
 loaded_models: set = set()             # names of currently loaded/warm models
 
+# Priority model written by baseprovider.py (_managed_model_loop)
+_PRIORITY_MODEL_PATH = os.path.expanduser("~/.thinkfarm/priority_model.txt")
+_priority_model: str = ""
+
 # GPU context limits discovered by the context prober { model_name: num_ctx }
 gpu_context_limits: dict = {}
+
+async def _ensure_priority_model_loaded() -> str | None:
+    """Load the priority model into VRAM if it hasn't been loaded yet.
+
+    Returns the model name that was actually loaded (or is already loaded),
+    or None if nothing was/would be loaded.
+    """
+    # Read the priority model from the file written by baseprovider.py
+    try:
+        with open(_PRIORITY_MODEL_PATH, "r") as f:
+            model = f.read().strip()
+    except (FileNotFoundError, PermissionError):
+        return None
+
+    if not model:
+        return None
+
+    # Get a fresh list of loaded models directly from Ollama to avoid stale cache issues
+    try:
+        loaded_models_check = await ollama.get_loaded_models()
+        loaded_names = {m.get("name") if isinstance(m, dict) else m for m in loaded_models_check} if loaded_models_check else set()
+    except Exception as e:
+        print(f"[PRIORITY] Error checking loaded models: {e}")
+        return None
+
+    # If priority model is already loaded (by us or another process), just confirm
+    if loaded_names and model in loaded_names:
+        return model
+
+    # If some other model is loaded and this isn't it, nothing to do right now
+    if loaded_names:
+        return None
+
+    # 3. Actually load the priority model if nothing else is in use
+    if not loaded_names:
+        try:
+            success = await ollama.load_model(model)
+            if not success:
+                raise Exception("load_model call returned False")
+            print(f"[PRIORITY] Ensured {model} is loaded.")
+            _priority_model = model  # Now safe to update
+            return model
+        except Exception as e:
+            print(f"[PRIORITY] Could not load {model}: {e}")
+            return None
+    else:
+        print(f"[PRIORITY] Another model already loaded ({list(loaded_names)}), skipping priority load.")
+
 
 # For change-detection on status updates
 _previous_status = None
@@ -555,11 +607,17 @@ async def execute_job_with_heartbeat_reset(websocket, data: dict):
 async def _heartbeat_loop():
     """Periodically send a minimal request to Ollama to keep it warm."""
     heartbeat_interval = 1200  # 20 minutes in seconds
+    _loaded_model = None  # Track which model we actually have in VRAM
     while True:
-        await asyncio.sleep(60)  # check every minute
+        await asyncio.sleep(120)  
+
+        # Ensure the priority model is present (solo start gap)
+        _loaded_model = await _ensure_priority_model_loaded() or _loaded_model
+
         elapsed = asyncio.get_event_loop().time() - _last_activity_time
         if elapsed >= heartbeat_interval and not stopping and is_busy == 0:
-            model = _last_model
+            # Probe whichever model is actually loaded in VRAM
+            model = _loaded_model or _last_model
             if not model:
                 print("[HEARTBEAT] No model available yet – skipping.")
                 continue

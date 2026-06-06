@@ -264,18 +264,19 @@ class ModelManager:
             print(f"{_PFX} Error fetching remote info for {model_name}: {e}")
             return None
 
-    async def optimize_portfolio(self, storage_limit_gb: float) -> List[str]:
+    async def optimize_portfolio(self, storage_limit_gb: float) -> tuple[List[str], str]:
         """
         Runs the optimization logic.
         Returns a list of models that were newly pulled and need probing.
         """
         self.managed_storage_gb = storage_limit_gb
         if storage_limit_gb <= 0:
-            return []
+            return ([], "")
 
         print(f"{_PFX} Starting portfolio optimization (Limit: {storage_limit_gb} GB)")
         
         # 0. Get current local models to identify User Models
+        gpu_limits = context_prober.load_context_limits()
         local_tags = await self.ollama.get_models()
         local_model_names = set()
         if local_tags:
@@ -299,18 +300,22 @@ class ModelManager:
         # Guard: without a GPU there is nothing to optimize
         if total_vram == 0:
             print(f"{_PFX} No GPU VRAM detected. Skipping portfolio optimization.")
-            return []
+            return ([], "")
 
         # 2. Get Demand Chart
         demand = await self.get_demand_chart()
         if not demand:
-            return []
+            return ([], "")
 
         # 3. Calculate Opportunity & Filter
         candidates = []
         for item in demand:
             model = item["model"]
             if model in all_user_models:
+                continue
+
+            # Skip models that failed GPU probing / cannot run on the GPU
+            if gpu_limits.get(model) == 0:
                 continue
 
             revenue = item["revenue"]
@@ -377,7 +382,25 @@ class ModelManager:
         if to_remove:
             if random.random() < 0.8:
                 print(f"{_PFX} Optimization cycle requires removals, but skipped due to 80% coin flip.")
-                return []
+                return ([], "")
+
+        # Determine priority model: highest opportunity among all models available to the provider
+        # (both user models and target managed models, and must have a positive value in gpu_context_limits)
+        available_priorities = []
+        for item in demand:
+            model = item["model"]
+            if model in all_user_models or model in target_managed_models:
+                if gpu_limits.get(model, 0) <= 0:
+                    continue
+                revenue = item["revenue"]
+                providers = max(1, item["providers"])
+                opportunity = revenue / providers
+                if model in self.manifest:
+                    opportunity *= _STICKINESS_FACTOR
+                available_priorities.append((model, opportunity))
+
+        available_priorities.sort(key=lambda x: x[1], reverse=True)
+        priority_model = available_priorities[0][0] if available_priorities else ""
 
         newly_pulled = []
 
@@ -397,8 +420,9 @@ class ModelManager:
             print(f"{_PFX} Pulling managed model: {model}")
             stream_ok = False
             try:
-                async for _ in self.ollama.pull_model(model):
-                    pass
+                async for chunk in self.ollama.pull_model(model):
+                    if isinstance(chunk, dict) and "error" in chunk:
+                        raise Exception(chunk["error"])
                 stream_ok = True
             except Exception as e:
                 print(f"{_PFX} Pull stream error for {model}: {e}")
@@ -415,7 +439,7 @@ class ModelManager:
             else:
                 print(f"{_PFX} Pull finished but model not found on disk for {model}.")
 
-        return newly_pulled
+        return (newly_pulled, priority_model)
 
     async def get_managed_models_set(self) -> Set[str]:
         """Return the set of managed model names."""

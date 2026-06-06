@@ -135,6 +135,20 @@ class OllamaClient:
             print(f"[OllamaClient] Error deleting model {model_name}: {e}")
             return False
 
+    async def load_model(self, model_name: str) -> bool:
+        """
+        Load a model into VRAM (pre-load with keep_alive=-1 to stay loaded).
+        Returns True if the request succeeded, False otherwise.
+        """
+        try:
+            response = await self.httpx_client.post("/api/generate", json={"model": model_name, "prompt": "hi", "keep_alive": -1, "stream": False})
+            response.raise_for_status()
+            print(f"[OllamaClient] Loaded model: {model_name}")
+            return True
+        except Exception as e:
+            print(f"[OllamaClient] Error loading model {model_name}: {e}")
+            return False
+
     async def generate(self, model: str, prompt: str, stream: bool = False) -> Any:
         """
         Generate response from a model.

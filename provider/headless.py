@@ -23,7 +23,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 _CONFIG_PATH = os.path.expanduser("~/.thinkfarm/config.ini")
+_PRIORITY_MODEL_PATH = os.path.expanduser("~/.thinkfarm/priority_model.txt")
 _PID_FILE = os.path.expanduser("~/.thinkfarm/provider.pid")
+
+
+def _write_priority_model(model: str) -> None:
+    """Write the priority model to a file for solo.py to consume."""
+    if not model:
+        return
+    config_dir = os.path.dirname(_CONFIG_PATH)
+    os.makedirs(config_dir, exist_ok=True)
+    with open(_PRIORITY_MODEL_PATH, "w") as f:
+        f.write(model)
+    print(f"[MGMT] Wrote priority model to {_PRIORITY_MODEL_PATH}: {model}")
+
 
 _server_process = None
 _stop_event = threading.Event()
@@ -121,7 +134,9 @@ def _managed_model_loop():
 
             if auto_manage and limit_gb > 0:
                 # Run optimization
-                newly_pulled = asyncio.run(_model_manager.optimize_portfolio(limit_gb))
+                newly_pulled, priority_model = asyncio.run(_model_manager.optimize_portfolio(limit_gb))
+
+                _write_priority_model(priority_model)
 
                 if newly_pulled:
                     print(f"[MGMT-LOOP] New models pulled: {newly_pulled}. Restarting service for probing...")

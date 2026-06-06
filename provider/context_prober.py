@@ -21,7 +21,8 @@ import asyncio
 import json
 import os
 import platform
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
+from datetime import datetime, timezone
 
 import httpx
 
@@ -33,6 +34,7 @@ _IS_MACOS_UNIFIED = platform.system() == "Darwin" and "arm64" in platform.machin
 # ---------------------------------------------------------------------------
 
 _CACHE_FILE = os.path.expanduser("~/.thinkfarm/gpu_context_limits.json")
+_BASELINES_FILE = os.path.expanduser("~/.thinkfarm/performance_baselines.json")
 
 # Smallest context size we will probe (powers-of-two friendlier than 1)
 _MIN_CTX = 512
@@ -154,6 +156,38 @@ def save_context_limits(limits: Dict[str, int]) -> None:
         print(f"{_PFX} WARNING: could not save cache file ({e}).")
 
 
+def load_performance_baselines() -> Dict[str, Any]:
+    """Load previously discovered baselines from disk. Returns a default dict structure on first run."""
+    if not os.path.exists(_BASELINES_FILE):
+        return {"baselines": {}, "performance_alerts": {}}
+    try:
+        with open(_BASELINES_FILE, "r") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"baselines": {}, "performance_alerts": {}}
+        if "baselines" not in data:
+            data["baselines"] = {}
+        if "performance_alerts" not in data:
+            data["performance_alerts"] = {}
+        return data
+    except Exception as e:
+        print(f"{_PFX} WARNING: could not read baselines file ({e}). Starting fresh.")
+        return {"baselines": {}, "performance_alerts": {}}
+
+
+def save_performance_baselines(data: Dict[str, Any]) -> None:
+    """Persist the baselines dict atomically-ish (write then rename)."""
+    os.makedirs(os.path.dirname(_BASELINES_FILE), exist_ok=True)
+    tmp = _BASELINES_FILE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, _BASELINES_FILE)
+        print(f"{_PFX} Saved performance baselines to {_BASELINES_FILE}.")
+    except Exception as e:
+        print(f"{_PFX} WARNING: could not save baselines file ({e}).")
+
+
 # ---------------------------------------------------------------------------
 # Ollama helper calls (standalone, not using OllamaClient to keep timeout control)
 # ---------------------------------------------------------------------------
@@ -234,6 +268,72 @@ async def _get_model_info(base_url: str, model_name: str) -> tuple[int, bool, bo
             f"Assuming generative/eligible, upper bound {_DEFAULT_MAX_CTX:,}."
         )
         return _DEFAULT_MAX_CTX, False, True
+
+
+async def _probe_performance_baseline(
+    base_url: str,
+    model_name: str,
+    num_ctx: int,
+) -> Optional[float]:
+    """
+    Establish a performance baseline by running 3 passes and measuring the slope.
+    Saves the average slope in performance_baselines.json.
+    """
+    print(f"{_PFX}   Establishing performance baseline for {model_name} at num_ctx={num_ctx:,}...")
+    slopes = []
+    
+    for i in range(1, 4):
+        print(f"{_PFX}     Pass {i}/3...")
+        try:
+            async with httpx.AsyncClient(base_url=base_url, timeout=120.0) as client:
+                payload = {
+                    "model": model_name,
+                    "prompt": "Why is the sky blue?",
+                    "stream": False,
+                    "options": {
+                        "num_ctx": num_ctx,
+                        "num_predict": 50,
+                        "temperature": 0.0
+                    }
+                }
+                resp = await client.post("/api/generate", json=payload)
+                resp.raise_for_status()
+                gen_data = resp.json()
+                
+                total_duration = gen_data.get("total_duration", 0)
+                load_duration = gen_data.get("load_duration", 0)
+                eval_count = gen_data.get("eval_count", 0)
+                prompt_eval_count = gen_data.get("prompt_eval_count", 0)
+                
+                compute_seconds = (total_duration - load_duration) / 1e9
+                if compute_seconds <= 0:
+                    compute_seconds = total_duration / 1e9
+                
+                if compute_seconds <= 0:
+                    print(f"{_PFX}       Warning: compute_seconds is 0. Skipping this pass.")
+                    continue
+                
+                slope = (eval_count + 0.003 * prompt_eval_count) / compute_seconds
+                print(f"{_PFX}       eval_count={eval_count}, prompt_eval_count={prompt_eval_count}, compute_seconds={compute_seconds:.3f}s, slope={slope:.3f} tokens/s")
+                slopes.append(slope)
+        except Exception as e:
+            print(f"{_PFX}       Error in pass {i}: {e}")
+            
+    if not slopes:
+        print(f"{_PFX}     Failed to measure any valid slopes for {model_name}.")
+        return None
+        
+    avg_slope = sum(slopes) / len(slopes)
+    print(f"{_PFX}     Average slope: {avg_slope:.3f} tokens/s")
+    
+    baselines_data = load_performance_baselines()
+    baselines_data["baselines"][model_name] = {
+        "slope": round(avg_slope, 2),
+        "samples": len(slopes),
+        "last_probed": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    }
+    save_performance_baselines(baselines_data)
+    return avg_slope
 
 
 async def _probe_at_ctx(
@@ -475,17 +575,25 @@ async def _probe_new_models(
     existing_limits: Dict[str, int],
 ) -> Dict[str, int]:
     """
-    Probe models that are not yet in the cache.
+    Probe models that are not yet in the cache or lack a performance baseline.
 
     This is the original probe logic, now separated for use by both the
     FastAPI app and the CLI entry point.
     """
     limits = dict(existing_limits)
-    to_probe = [m for m in model_names if m not in limits]
+    baselines_data = load_performance_baselines()
+    baselines = baselines_data.get("baselines", {})
+
+    to_probe = []
+    for m in model_names:
+        if m not in limits:
+            to_probe.append(m)
+        elif limits[m] > 0 and m not in baselines:
+            to_probe.append(m)
 
     if not to_probe:
         print(
-            f"{_PFX} All {len(model_names)} model(s) already have cached limits - "
+            f"{_PFX} All {len(model_names)} model(s) already have cached limits and baselines - "
             f"skipping probe."
         )
         return limits
@@ -516,9 +624,13 @@ async def _probe_new_models(
             print(f"{_PFX}  RESULT: {model_name} is an embedding model. Storing -1 (N/A).")
             limits[model_name] = -1
         else:
-            best_ctx = await _find_max_gpu_ctx(
-                base_url, model_name, upper_bound=upper_bound, is_embed=False
-            )
+            if model_name in limits and limits[model_name] > 0:
+                best_ctx = limits[model_name]
+                print(f"{_PFX}  Using cached context limit: {best_ctx:,} tokens.")
+            else:
+                best_ctx = await _find_max_gpu_ctx(
+                    base_url, model_name, upper_bound=upper_bound, is_embed=False
+                )
 
             if best_ctx is None:
                 print(
@@ -532,6 +644,9 @@ async def _probe_new_models(
                     f"= {best_ctx:,} tokens [OK]"
                 )
                 limits[model_name] = best_ctx
+                
+                # Establish performance baseline
+                await _probe_performance_baseline(base_url, model_name, best_ctx)
 
         # Persist after each model in case of crash
         save_context_limits(limits)
@@ -615,6 +730,7 @@ async def _run_cli_probe(base_url: str, force: bool = False):
         print(f"{_PFX} --force given - clearing {len(limits)} cached limits.")
         save_context_limits({})
         limits = {}
+        save_performance_baselines({"baselines": {}, "performance_alerts": {}})
 
     # Fetch all models from Ollama
     print(f"{_PFX} Fetching model list from {base_url}/api/tags...")

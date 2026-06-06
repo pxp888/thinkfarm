@@ -1,185 +1,174 @@
-# llamashare Provider — Architectural Workflow
+# thinkfarm Provider Launcher (standalone)
 
-This document details the operational logic of the LlamaShare Provider system, which consists of two files:
+A PyQt6 GUI front-end that starts/stops an AI model serving provider via `solo.py` (no FastAPI). Configuration and status management only — no log output in the UI.
 
-- **`provider.py`** — GUI front-end launcher (starts/stops the provider, manages config)
-- **`solo.py`** — Core provider logic (WebSocket lifecycle, job acceptance, inference execution)
+## Control Flow
 
-The standalone provider `solo.py` connects local Ollama instances to the distributed cluster, acting as a drop-in replacement for `main.py` to avoid FastAPI overhead.
+### 1. APPLICATION LAUNCH
 
-## 1. Startup & Connection Lifecycle
+```
+App instantiation → ProviderGUI.__init__()
 
-The system consists of two processes:
-
-1. **`provider.py` (Launcher)** — A customtkinter GUI application that loads config and can launch `solo.py` as a subprocess
-2. **`solo.py` (Provider)** — The core logic that manages the WebSocket lifecycle
-
-When launched via `provider.py`, the launcher starts `solo.py` with `subprocess.Popen([sys.executable, "-u", "solo.py"])`. When PyInstaller frozen, it dispatches via `--solo` / `--probe` flags.
-
-Inside `solo.py`:
-
-```mermaid
-sequenceDiagram
-    participant LA as Launcher (provider.py)
-    participant P as Provider (solo.py)
-    participant C as Config (Disk)
-    participant O as Local Ollama
-    participant S as Central Server
-
-    LA->>P: launch subprocess [sys.executable, "-u", "solo.py"]
-    P->>C: load_config.ini → PROVIDER_ID, SERVER_URL
-    P->>C: load gpu_context_limits.json (cached)
-    P->>O: Initialize OllamaClient
-    P->>S: WebSocket connect /ws/provider/{PROVIDER_ID}
-    S-->>P: accept
-    
-    rect rgb(240, 248, 255)
-        Note over P,O: Initial Handshake
-        P->>O: /api/tags (get all models)
-        P->>O: /api/ps (get loaded models)
-        P->>S: type: "status" {models, loaded, context_limits, is_busy}
-    end
-
-    loop Persistent WebSocket
-        par Periodic Status Updates (every 30s)
-            P->>P: Check if loaded_models or is_busy changed
-            opt If Changed
-                P->>S: type: "status" (complete payload)
-            end
-            alt No change (10 intervals)
-                P->>S: type: "status" (force send)
-            end
-        and Message Listener
-            S->>P: job_published / job_assigned
-        end
-    end
+    ├── restart_ollama_server()
+    │     • Read config for ollama_models_path
+    │     • Pick a free port (non-11434)
+    │     • Spawn: Popen(["ollama", "serve"])
+    │     • Set self._ollama_url = http://127.0.0.1:{port}
+    │     • Update OllamaClient HTTP base URL
+    │
+    ├── setup_ui()
+    │     • Build sidebar (logo, start/stop/save buttons)
+    │     • Build config card (ID, model path, storage, auto)
+    │     • Build status bar (dot + text)
+    │
+    ├── _load_config()
+    │     • Read ~/.thinkfarm/config.ini
+    │     • Populate UI fields from config
+    │     • Remove stale ollama_url config if present
+    │
+    ├── setup_tray()
+    │     • Create system tray icon + Restore/Exit menu
+    │     • Double-click → restore window
+    │     • SystemTrayAvailable → close hides to tray
+    │
+    └── _managed_model_loop Thread (daemon)
+          • Poll: service running? NO → sleep 2s, continue
 ```
 
----
+### 2. USER CLICKS "START PROVIDER"
 
-## 2. The "Smart Race" (Job Acceptance)
+```
+start_service() [main thread]
+    ├── Disable start_btn
+    ├── Clear _stop_event
+    └── Spawn background thread: _startup_logic()
 
-When `job_published` arrives, the provider uses a **tiered delay** system. A cold model waits a bit; a warm model accepts instantly. After the delay, the provider checks if the model is still available (it may have been evicted during the wait).
+        _startup_logic() [background thread]
+            ├── get_ollama_models(url)
+            ├── load_context_limits()
+            ├── unscanned = all_models - existing_limits
+            
+            if unscanned:
+                emit "probing"
+                run_context_probing(unscanned)
+            
+            emit trigger_actual_start [slot → UI thread]
 
-```mermaid
-sequenceDiagram
-    participant S as Central Server
-    participant P as Provider
-    participant O as Local Ollama
+        _actual_start_service() [UI thread]
+            if frozen (PyInstaller):
+                Popen([sys.executable, "--solo"])
+            else:
+                Popen([python, "solo.py"])
 
-    S->>P: type: "job_published" {model, body}
-    
-    P->>P: Eligibility Check
-    Note right of P: 1. Model in my_models?+2. Does num_ctx fit GPU?
-    
-    alt Eligible
-        P->>O: Get loaded_models
-        alt Model not in VRAM
-            P->>P: Delay: 0.5s (cold start penalty)
-        else Model already warm
-            P->>P: Delay: 0s (instant accept)
-        end
+            Spawn check_startup() [polling thread]
+                Loop 50× (≤5s):
+                    poll _server_process alive?
+                    YES → emit "started", return
+                    stop_event set? → return
+                    NO → sleep(0.1), retry
+
+    UI state "started":
+        start_btn disabled (grey)
+        stop_btn enabled (grey)
+        status green ● SYSTEM RUNNING
+```
+
+### 3. USER CLICKS "STOP PROVIDER" (or closes window with running)
+
+```
+stop_service() [main thread]
+    ├── _stop_event.set()
+    ├── server_process.terminate()
+    └── emit "stopping" → orange ● FINISHING JOBS
+
+    wait_join() [thread]
+        server_process.wait(timeout=180s)
+            timeout? → kill() + wait()
+        _server_process = None
+        emit "stopped"
+            start_btn enabled (green)
+            stop_btn disabled (grey)
+            status grey ● SYSTEM STOPPED
+```
+
+### 4. AUTO-MANAGED MODEL LOOP [daemon background thread, every 1 hour]
+
+```
+_managed_model_loop()
+    loop forever:
+        service running? NO → sleep(2s), continue
         
-        P->>P: Sleep(delay)
+        YES → read config
+            auto_manage = true AND limit_gb > 0?
+                YES → optimize_portfolio(limit_gb)
+                    _write_priority_model(priority_model)
+                    
+                    newly_pulled models?
+                        NO → sleep(1h), continue
+                        
+                        YES:
+                            stop_service()
+                            while server_process is not None: sleep(1s)
+                            
+                            run_context_probing(new_models)
+                            
+                            start_service()
         
-        P->>P: Post-delay check: model still in my_models?
-        alt Yes
-            P->>S: type: "accept" {job_id, provider_id}
-        else Model evicted
-            P->>P: Decline (silently)
-        end
-    else Ineligible
-        P->>P: Decline (no model or context too large)
-    end
+        sleep(3600s) [poll every 2s for responsiveness]
 ```
 
----
+### 5. WINDOW CLOSED (with running provider)
 
-## 3. Job Execution & Streaming
-
-Once the server confirms the provider won the race, it begins the inference execution. Only one job runs at a time per provider to protect VRAM.
-
-The provider normalizes the incoming request before dispatching to Ollama:
-
-| Endpoint | Normalization |
-|---|---|
-| Embed | Remaps `prompt` → `input`, forces `stream=False` |
-| Show | Remaps `model` → `name`, forces `stream=False` |
-| v1/* (OpenAI) | Adds `stream_options: {include_usage: true}` when streaming |
-
-```mermaid
-sequenceDiagram
-    participant S as Central Server
-    participant P as Provider
-    participant O as Local Ollama
-
-    S->>P: type: "job_assigned" {job_id, endpoint, body}
-    activate P
-    P->>P: is_busy += 1
-    P->>P: Acquire execution_lock (asyncio.Lock)
-    P->>P: Normalize: endpoint_map → Ollama path, stream flags, body fields
-    
-    alt Stream (default)
-        P->>O: POST ollama_path (streaming)
-        loop Streaming Response
-            O->>P: NDJSON/stream chunk
-            P->>P: Capture prompt_eval_count / eval_count (Ollama-native or OpenAI 'usage')
-            P->>S: type: "chunk" {job_id, data}
-        end
-    else No Stream (embed/show)
-        P->>O: POST ollama_path (non-streaming)
-        P->>P: Capture prompt_eval_count / eval_count from response
-        P->>S: type: "chunk" {job_id, data: full JSON response}
-    end
-
-    P->>S: type: "job_done" {job_id, prompt_eval, eval_count, total_duration}
-    
-    P->>P: Release execution_lock
-    P->>P: is_busy -= 1
-    deactivate P
+```
+closeEvent():
+    ├── server_process? → stop_service()
+    ├── _ollama_process? → terminate + wait(5s)
+    └── _ollama_log_file? → close
 ```
 
----
+### 6. MINIMIZE
 
-## 4. Key Logic Components
+```
+changeEvent() minimized:
+    hide() window → appears in system tray only
+```
 
-### Eligibility & Context Filtering
-Before accepting a job, the provider calls `_context_fits()`. This checks the requested `num_ctx` against a local cache of GPU context limits (`gpu_context_limits.json`). If the limit is 0, the provider accepts optimistically (uncached). This prevents "Out of Memory" (OOM) errors that would occur if the model were offloaded to CPU or crashed during a long request.
+### 7. SAVE SETTINGS
 
-### Request Normalization
-The provider acts as a compatibility layer, mapping various incoming request formats to the specific requirements of the local Ollama version:
+```
+save_config():
+    ├── Validate: provider_id non-empty
+    ├── Validate: storage is numeric
+    └── Errors? → show warning
+    
+    write to ~/.thinkfarm/config.ini
+    restart_ollama_server()
+    → show "Settings saved" success box
+```
 
-| Endpoint Type | Mapping |
-|---|---|
-| Embeddings | Remaps `prompt` → `input` for `/api/embed` |
-| Show | Remaps `model` → `name` for `/api/show` |
-| Embeddings/Show | Forces `stream=False` |
-| OpenAI-compatible (v1/*) | Adds `stream_options: {include_usage: true}` when streaming; forwards paths directly |
-| Endpoint routing | Maps keys (`chat`, `generate`, `embed`, `v1/chat/completions`, etc.) via `_ENDPOINT_MAP` |
+### 8. CLI ARGUMENT DISPATCH (if __name__ == "__main__")
 
-### Usage Count Capture
-Streaming responses capture usage statistics from **both** formats:
-- Ollama native: `prompt_eval_count` / `eval_count` per chunk
-- OpenAI compatible: `usage.prompt_tokens` / `usage.completion_tokens`
+```
+sys.argv flags:
+    --solo        → asyncio.run(solo.main()); exit(0)
+    --probe <...> → context_prober.main(); exit(0)
+    (none)        → run the full GUI as described above
+```
 
-### Periodic Status Updates (30s interval)
-The provider sends updates via `_get_changed_loaded_status()`, which checks if `loaded_models` or `is_busy` changed. If nothing changed, it only sends when a change is detected — **except every 10th heartbeat**, where it forces a full status push to keep the server's data fresh.
+### 9. PRIORITY MODEL FILE (producer → consumer IPC)
 
-The `_previous_status` object tracks `models`, `loaded_models`, and `is_busy` as frozensets for change detection.
+**File:** `~/.thinkfarm/priority_model.txt` — single disk file shared between provider.py and solo.py.
 
-### Concurrency Control
-- **`is_busy`**: An integer counter of active or queued jobs. Used to signal state to the server.
-- **`execution_lock`**: A global `asyncio.Lock` that serializes the actual hitting of the Ollama API, preventing multiple heavy inference tasks from competing for the same GPU.
+| producer                      | consumer (solo.py)                       |
+|-------------------------------|------------------------------------------|
+| `optimize_portfolio()`        | `_ensure_priority_model_loaded():`       |
+| determines priority model     | 1. Read & cache model name from disk    |
+| async.run(...)                | 2. Check: is VRAM empty?                 |
+| `write_priority_model(x)` ←──│   NO → skip (already loaded)             |
+|                               |   YES → `load_model(priority_model)`    |
 
----
+**VRAM load rule:** Priority model only enters VRAM when no other model is currently resident. This is enforced in `_ensure_priority_model_loaded()` which queries Ollama's loaded models list first — if anything is loaded, it returns without touching the priority model.
 
-## 5. State Summary
+**Fallback role during heartbeat:** When checking whether to send a keepalive ping, solo.py uses `model = _load_priority_model() or _last_model`. So it also serves as the **second-tier fallback** after `_last_model` (the user's most recent interactive model) — not before it.
 
-| Variable | Scope | Description |
-|---|---|---|
-| `PROVIDER_ID` | Config | Unique identifier for this machine (from `config.ini`). |
-| `my_models` | Local | Set of all models available in the local Ollama catalog. |
-| `loaded_models`| Local | Set of models currently warm in VRAM (from `/api/ps`). |
-| `gpu_context_limits` | Disk | Map of model names to max safe `num_ctx` values. |
-| `is_busy` | Local | Global counter used for scheduling and priority. |
-| `execution_lock` | Local | Lock ensuring serial inference execution. |
+**Priority of model resolution during job processing:** `_last_model` → `_load_priority_model()` → error. The priority model is the last resort, only used when no other model is already loaded or available.

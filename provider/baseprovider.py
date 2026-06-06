@@ -33,6 +33,18 @@ from model_manager import ModelManager
 load_dotenv()
 
 _CONFIG_PATH = os.path.expanduser("~/.thinkfarm/config.ini")
+_PRIORITY_MODEL_PATH = os.path.expanduser("~/.thinkfarm/priority_model.txt")
+
+
+def _write_priority_model(model: str) -> None:
+    """Write the priority model to a file for solo.py to consume."""
+    if not model:
+        return
+    config_dir = os.path.dirname(_CONFIG_PATH)
+    os.makedirs(config_dir, exist_ok=True)
+    with open(_PRIORITY_MODEL_PATH, "w") as f:
+        f.write(model)
+    print(f"[MGMT] Wrote priority model to {_PRIORITY_MODEL_PATH}: {model}")
 
 
 class ProviderSignals(QObject):
@@ -103,7 +115,9 @@ class ProviderGUI(QMainWindow):
 
                 if auto_manage and limit_gb > 0:
                     # Run optimization
-                    newly_pulled = asyncio.run(self.model_manager.optimize_portfolio(limit_gb))
+                    newly_pulled, priority_model = asyncio.run(self.model_manager.optimize_portfolio(limit_gb))
+                    
+                    _write_priority_model(priority_model)
                     
                     if newly_pulled:
                         print(f"[MGMT-LOOP] New models pulled: {newly_pulled}. Restarting service for probing...")
@@ -180,7 +194,7 @@ class ProviderGUI(QMainWindow):
         sidebar_layout.setSpacing(10)
 
         # Logo image at top of sidebar
-        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thinkfarm.webp")
+        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "desktop.webp")
         pixmap = QPixmap(logo_path)
         if not pixmap.isNull():
             pixmap = pixmap.scaled(
@@ -240,7 +254,7 @@ class ProviderGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Provider v18")
+        self.info_label = QLabel("Provider v19")
         self.info_label.setStyleSheet("color: #666666; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -310,14 +324,13 @@ class ProviderGUI(QMainWindow):
         self.save_btn.setFixedSize(160, 40)
         self.save_btn.setStyleSheet("""
             QPushButton {
-                background-color: #2d2d2d;
+                background-color: #548889;
                 color: white;
                 border-radius: 0px;
                 font-weight: 500;
                 font-size: 14px;
                 border: none;
             }
-            QPushButton:hover { background-color: #548889; }
         """)
         self.save_btn.clicked.connect(self.save_config)
         save_btn_layout.addWidget(self.save_btn)
@@ -524,7 +537,7 @@ class ProviderGUI(QMainWindow):
         """Initialize the system tray icon and its context menu."""
         self.tray_icon = QSystemTrayIcon(self)
         
-        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thinkfarm.webp")
+        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "desktop.webp")
         if os.path.exists(logo_path):
             self.tray_icon.setIcon(QIcon(logo_path))
         else:
