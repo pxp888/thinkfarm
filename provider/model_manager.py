@@ -357,6 +357,53 @@ class ModelManager:
             else:
                 break
 
+        # 5. Handle Displacement & Fill leftover quota with existing models
+        manifest_sizes = {}
+        for model in self.manifest:
+            info = await self.ollama.get_model_info(model)
+            manifest_sizes[model] = self._estimate_vram_for_model(info) if info else 0
+
+        to_add = set(target_managed_models.keys()) - self.manifest
+        candidates_for_removal = list(self.manifest - set(target_managed_models.keys()) - self.user_models)
+        
+        # Sort candidates for removal: prefer to keep those with higher opportunity
+        demand_opportunity = {item["model"]: item["revenue"] / max(1, item["providers"]) for item in demand}
+        for m in demand_opportunity:
+            if m in self.manifest:
+                demand_opportunity[m] *= _STICKINESS_FACTOR
+
+        candidates_for_removal.sort(key=lambda m: demand_opportunity.get(m, 0), reverse=True)
+
+        to_remove = set()
+        if to_add:
+            leftover_bytes = limit_bytes - current_usage_bytes
+            for model in candidates_for_removal:
+                model_size = manifest_sizes.get(model, 0)
+                if model_size <= leftover_bytes:
+                    leftover_bytes -= model_size
+                    info = await self.ollama.get_model_info(model)
+                    target_managed_models[model] = {
+                        "model": model,
+                        "opportunity": demand_opportunity.get(model, 0),
+                        "size_bytes": model_size,
+                        "info": info or {}
+                    }
+                    current_usage_bytes += model_size
+                else:
+                    to_remove.add(model)
+        else:
+            # Nothing is being added, keep all current manifest models to avoid useless removals
+            for model in candidates_for_removal:
+                model_size = manifest_sizes.get(model, 0)
+                info = await self.ollama.get_model_info(model)
+                target_managed_models[model] = {
+                    "model": model,
+                    "opportunity": demand_opportunity.get(model, 0),
+                    "size_bytes": model_size,
+                    "info": info or {}
+                }
+                current_usage_bytes += model_size
+
         # Optimized Plan
         plan_lines = [
             f"{_PFX} === Optimized Plan ===",
@@ -366,8 +413,6 @@ class ModelManager:
         for name, c in target_managed_models.items():
             plan_lines.append(f"{_PFX}     - {name} ({c['opportunity']:.2f} opp, {c['size_bytes'] / (1024**3):.2f} GB)")
         # Deletions & additions
-        to_remove = self.manifest - set(target_managed_models.keys()) - self.user_models
-        to_add = set(target_managed_models.keys()) - self.manifest
         # Models already on disk won't need pulling (user_models already excluded them)
         for model in to_remove:
             plan_lines.append(f"{_PFX}   ❌ REMOVE: {model}")

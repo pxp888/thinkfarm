@@ -288,26 +288,26 @@ async def _probe_performance_baseline(
             async with httpx.AsyncClient(base_url=base_url, timeout=120.0) as client:
                 payload = {
                     "model": model_name,
-                    "prompt": "Why is the sky blue?",
+                    "prompt": "what is the history of Sweden?",
                     "stream": False,
                     "options": {
                         "num_ctx": num_ctx,
-                        "num_predict": 50,
-                        "temperature": 0.0
+                        "temperature": 0.2
                     }
                 }
                 resp = await client.post("/api/generate", json=payload)
                 resp.raise_for_status()
                 gen_data = resp.json()
                 
-                total_duration = gen_data.get("total_duration", 0)
-                load_duration = gen_data.get("load_duration", 0)
+                prompt_eval_duration = gen_data.get("prompt_eval_duration", 0)
+                eval_duration = gen_data.get("eval_duration", 0)
                 eval_count = gen_data.get("eval_count", 0)
                 prompt_eval_count = gen_data.get("prompt_eval_count", 0)
                 
-                compute_seconds = (total_duration - load_duration) / 1e9
+                compute_seconds = (prompt_eval_duration + eval_duration) / 1e9
                 if compute_seconds <= 0:
-                    compute_seconds = total_duration / 1e9
+                    print(f"{_PFX}       Warning: compute_seconds is 0. Skipping this pass.")
+                    continue
                 
                 if compute_seconds <= 0:
                     print(f"{_PFX}       Warning: compute_seconds is 0. Skipping this pass.")
