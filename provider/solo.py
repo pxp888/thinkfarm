@@ -465,32 +465,7 @@ async def handle_job_published(websocket, data: dict):
 
 
 # ---------------------------------------------------------------------------
-# Job execution – stream from Ollama back to server via WebSocket
-# ---------------------------------------------------------------------------
-def _rewrite_response_data(data_str: str) -> str:
-    """Rewrite any occurrences of 'thinkfarm-' model names in the response back to the original."""
-    prefix = ""
-    json_str = data_str
-    if data_str.startswith("data: "):
-        prefix = "data: "
-        json_str = data_str[6:]
-
-    if json_str.strip() == "[DONE]":
-        return data_str
-
-    try:
-        obj = json.loads(json_str)
-        if isinstance(obj, dict) and "model" in obj and isinstance(obj["model"], str):
-            if obj["model"].startswith("thinkfarm-"):
-                obj["model"] = obj["model"][len("thinkfarm-"):]
-                return prefix + json.dumps(obj)
-    except Exception:
-        pass
-    return data_str
-
-
-# ---------------------------------------------------------------------------
-# Job execution – stream from Ollama back to server via WebSocket
+# Job execution – stream from Ollama back to a server via WebSocket
 # ---------------------------------------------------------------------------
 async def execute_job(websocket, data: dict):
     global is_busy
@@ -543,49 +518,45 @@ async def execute_job(websocket, data: dict):
                     if stream:
                         batch = []
                         sep = "\n\n" if endpoint_key.startswith("v1/") else "\n"
-                        
-                        async def flusher():
-                            while True:
-                                try:
-                                    await asyncio.sleep(0.05)
-                                    if batch:
-                                        data_to_send = "".join(batch)
-                                        batch.clear()
-                                        await websocket.send(
-                                            json.dumps({"type": "chunk", "job_id": job_id, "data": data_to_send})
-                                        )
-                                except asyncio.CancelledError:
-                                    break
-                                except Exception as e:
-                                    print(f"Error in batch flusher: {e}")
-                                    break
 
-                        flusher_task = asyncio.create_task(flusher())
+                        # Batch all tokens over a fixed interval. Fast models are pooled into fewer packets.
+                        _flush_interval = 0.075  # 75ms
+
+                        async def batch_flusher():
+                            while True:
+                                await asyncio.sleep(_flush_interval)
+                                if batch:
+                                    data_to_send = "".join(batch)
+                                    batch.clear()
+                                    await websocket.send(
+                                        json.dumps({"type": "chunk", "job_id": job_id, "data": data_to_send})
+                                    )
+
+                        flusher_task = asyncio.create_task(batch_flusher())
                         try:
                             async with client.stream("POST", ollama_path, json=body) as response:
                                 async for line in response.aiter_lines():
                                     if not line:
                                         continue
-                                    line_rewritten = _rewrite_response_data(line)
-                                    batch.append(line_rewritten + sep)
-                                    
+                                    batch.append(line + sep)
+
                                     try:
                                         # Handle SSE format for v1 endpoints
                                         parse_line = line
                                         if line.startswith("data: "):
                                             parse_line = line[6:]
-                                        
+
                                         if parse_line.strip() == "[DONE]":
                                             continue
 
                                         obj = json.loads(parse_line)
-                                        
+
                                         # Capture Ollama native usage
                                         if obj.get("prompt_eval_count"):
                                             prompt_eval_count = obj["prompt_eval_count"]
                                         if obj.get("eval_count"):
                                             eval_count = obj["eval_count"]
-                                            
+
                                         # Capture OpenAI compatible usage
                                         if "usage" in obj and obj["usage"]:
                                             u = obj["usage"]
@@ -601,8 +572,8 @@ async def execute_job(websocket, data: dict):
                                 await flusher_task
                             except asyncio.CancelledError:
                                 pass
-                            
-                            # Final flush of any remaining tokens
+
+                            # Drain any tokens still waiting in the batch (stream ended mid-interval)
                             if batch:
                                 data_to_send = "".join(batch)
                                 batch.clear()
