@@ -547,6 +547,39 @@ async def _find_max_gpu_ctx(
 # ---------------------------------------------------------------------------
 
 
+async def create_custom_model(base_url: str, original_model: str, max_ctx: int) -> bool:
+    """
+    Create a custom model in Ollama based on original_model with a fixed context window.
+    The custom model is prefixed with 'thinkfarm-'.
+    """
+    custom_model_name = f"thinkfarm-{original_model}"
+    print(f"{_PFX} Ensuring custom model {custom_model_name} exists with num_ctx={max_ctx}...")
+    try:
+        async with httpx.AsyncClient(base_url=base_url, timeout=60.0) as client:
+            resp = await client.post(
+                "/api/create",
+                json={
+                    "model": custom_model_name,
+                    "from": original_model,
+                    "parameters": {
+                        "num_ctx": max_ctx
+                    },
+                    "stream": False,
+                }
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            if result.get("status") == "success":
+                print(f"{_PFX} Successfully created/updated custom model {custom_model_name}.")
+                return True
+            else:
+                print(f"{_PFX} Custom model creation status: {result}")
+                return False
+    except Exception as e:
+        print(f"{_PFX} ERROR creating custom model {custom_model_name}: {e}")
+        return False
+
+
 async def run_context_probing(
     base_url: str,
     model_names: list,
@@ -596,6 +629,11 @@ async def _probe_new_models(
             f"{_PFX} All {len(model_names)} model(s) already have cached limits and baselines - "
             f"skipping probe."
         )
+        # Ensure custom models exist for all eligible local models that have a valid limit
+        for model_name in model_names:
+            limit = limits.get(model_name)
+            if limit is not None and limit > 0:
+                await create_custom_model(base_url, model_name, limit)
         return limits
 
     for idx, model_name in enumerate(to_probe, 1):
@@ -655,6 +693,12 @@ async def _probe_new_models(
         await _unload_model(base_url, model_name, is_embed=is_embed)
         print()
 
+    # Ensure custom models exist for all eligible local models that have a valid limit
+    for model_name in model_names:
+        limit = limits.get(model_name)
+        if limit is not None and limit > 0:
+            await create_custom_model(base_url, model_name, limit)
+
     print(f"{_PFX} ----- ----- ----- ----- ----- ----- ----- ----- ----- -----")
     print(f"{_PFX} Probing complete. Summary:")
     for model, ctx in limits.items():
@@ -665,6 +709,21 @@ async def _probe_new_models(
     )
 
     return limits
+
+
+async def get_performance_data() -> Dict[str, Any]:
+    """Fetch the global performance endpoint and return the parsed JSON."""
+    perf_url = "https://www.thinkfarm.net/api/performance"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(perf_url)
+            resp.raise_for_status()
+            data = resp.json()
+        print(f"{_PFX}  [PERF] Fetched global performance data for {len(data.get('data', []))} model(s).")
+        return data
+    except Exception as e:
+        print(f"{_PFX}  [PERF] WARNING: could not fetch performance data from {perf_url} ({e}).")
+        return {"data": []}
 
 
 async def get_ollama_models(base_url: str) -> list:
@@ -681,6 +740,7 @@ async def get_ollama_models(base_url: str) -> list:
             data = resp.json()
             models = data.get("models", [])
             names = [m.get("name", "").strip() for m in models if m.get("name")]
+            names = [n for n in names if not n.startswith("thinkfarm-")]
             return names
     except Exception as e:
         print(f"{_PFX} WARNING: Failed to fetch tags from {base_url} ({e}).")

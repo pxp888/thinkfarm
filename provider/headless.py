@@ -7,6 +7,7 @@ Configuration loaded from ~/.thinkfarm/config.ini.
 
 import asyncio
 import configparser
+import json
 import uuid
 import multiprocessing
 import os
@@ -25,6 +26,54 @@ load_dotenv()
 _CONFIG_PATH = os.path.expanduser("~/.thinkfarm/config.ini")
 _PRIORITY_MODEL_PATH = os.path.expanduser("~/.thinkfarm/priority_model.txt")
 _PID_FILE = os.path.expanduser("~/.thinkfarm/provider.pid")
+_SLOPEMON_DATA_PATH = os.path.expanduser("~/.thinkfarm/_slopemon.json")
+_TRIGGER_PATH = os.path.expanduser("~/.thinkfarm/solo_slope_trigger.json")
+
+# ---------------------------------------------------------------------------
+# Blacklist
+# ---------------------------------------------------------------------------
+_BLACKLIST_FILE = os.path.expanduser("~/.thinkfarm/blacklisted_models.json")
+_blacklisted_models: set = set()
+
+
+def load_blacklist() -> None:
+    """Load the blacklist from disk into ``_blacklisted_models``."""
+    global _blacklisted_models
+    try:
+        if os.path.exists(_BLACKLIST_FILE):
+            with open(_BLACKLIST_FILE, "r") as f:
+                _blacklisted_models = set(json.load(f))
+        else:
+            _blacklisted_models = set()
+        print(f"[BLACKLIST] Loaded {len(_blacklisted_models)} model(s) from {_BLACKLIST_FILE}.")
+    except Exception as e:
+        print(f"[BLACKLIST] Error loading blacklist: {e}")
+        _blacklisted_models = set()
+
+
+def save_blacklist() -> None:
+    """Persist the current blacklist to disk."""
+    os.makedirs(os.path.dirname(_BLACKLIST_FILE), exist_ok=True)
+    try:
+        with open(_BLACKLIST_FILE, "w") as f:
+            json.dump(sorted(_blacklisted_models), f, indent=2)
+        print(f"[BLACKLIST] Saved {len(_blacklisted_models)} model(s) to {_BLACKLIST_FILE}.")
+    except Exception as e:
+        print(f"[BLACKLIST] Error saving blacklist: {e}")
+
+
+def add_to_blacklist(model_name: str) -> None:
+    """Add *model_name* to the blacklist and persist it."""
+    global _blacklisted_models
+    _blacklisted_models.add(model_name)
+    save_blacklist()
+    print(f"[BLACKLIST] Added \"{model_name}\" to blacklist.")
+
+# ---------------------------------------------------------------------------
+# Performance-based auto-blacklist (check against global peak)
+# ---------------------------------------------------------------------------
+_PERF_THRESHOLD = 1 / 3   # blacklisted if baseline < 1/3 * peak
+_PERF_MIN_SAMPLES = 30      # need > 30 samples before trusting the peak
 
 
 def _write_priority_model(model: str) -> None:
@@ -36,6 +85,31 @@ def _write_priority_model(model: str) -> None:
     with open(_PRIORITY_MODEL_PATH, "w") as f:
         f.write(model)
     print(f"[MGMT] Wrote priority model to {_PRIORITY_MODEL_PATH}: {model}")
+
+
+def _check_slopotrigger() -> dict | None:
+    try:
+        if os.path.exists(_TRIGGER_PATH):
+            with open(_TRIGGER_PATH, "r") as f:
+                data = json.load(f)
+            os.remove(_TRIGGER_PATH)
+            return data
+    except Exception as e:
+        print(f"[SLOPE-MON] Error checking trigger file: {e}")
+    return None
+
+def _decide_action(triggered_model: str, trigger_throughput: float) -> str:
+    try:
+        baselines_data = context_prober.load_performance_baselines()
+        all_baselines = baselines_data.get("baselines", {})
+        local_entry = all_baselines.get(triggered_model, {})
+        local_slope = local_entry.get("slope")
+        
+        if local_slope and trigger_throughput < 0.5 * local_slope:
+            return "restart_ollama"
+    except Exception as e:
+        print(f"[SLOPE-MON] Error in _decide_action: {e}")
+    return "blacklist_and_restart"
 
 
 _server_process = None
@@ -59,6 +133,7 @@ def _load_config():
     auto_manage = True
     managed_storage_gb = "50"
     ollama_url = "http://127.0.0.1:11434"
+    ollama_restart_cmd = ""
     provider_id = None  # will fall through to env/system ID
 
     # Priority: Config File > Environment Variable > (Missing) defaults > System ID > UUID
@@ -76,12 +151,14 @@ def _load_config():
         ollama_url = config.get("provider", "ollama_url", fallback=ollama_url)
         managed_storage_gb = config.get("provider", "managed_storage_gb", fallback=managed_storage_gb)
         auto_manage = config.getboolean("provider", "auto_manage", fallback=auto_manage)
+        ollama_restart_cmd = config.get("provider", "ollama_restart_cmd", fallback=ollama_restart_cmd)
 
     return {
         "provider_id": provider_id,
         "ollama_url": ollama_url,
         "managed_storage_gb": managed_storage_gb,
         "auto_manage": auto_manage,
+        "ollama_restart_cmd": ollama_restart_cmd,
     }
 
 
@@ -132,6 +209,28 @@ def _managed_model_loop():
 
             limit_gb = float(limit_gb_str)
 
+            # Fetch and write slopemon state
+            try:
+                import httpx
+                from datetime import datetime
+                with httpx.Client(timeout=15.0) as client:
+                    resp = client.get("https://www.thinkfarm.net/api/performance")
+                    resp.raise_for_status()
+                    perf_data = resp.json()
+
+                state = {"updated_at": datetime.now().isoformat(), "models": {}}
+                for entry in perf_data.get("data", []):
+                    name = entry.get("model", "")
+                    peak = entry.get("peak", 0)
+                    n_samples = entry.get("n", 0)
+                    if n_samples > _PERF_MIN_SAMPLES and peak > 0:
+                        state["models"][name] = {"peak": round(peak, 1)}
+
+                with open(_SLOPEMON_DATA_PATH, "w") as f:
+                    json.dump(state, f, indent=2)
+            except Exception as e:
+                print(f"[MGMT-LOOP] Error fetching /performance for slopemon: {e}")
+
             if auto_manage and limit_gb > 0:
                 # Run optimization
                 newly_pulled, priority_model = asyncio.run(_model_manager.optimize_portfolio(limit_gb))
@@ -169,6 +268,43 @@ def _managed_model_loop():
             time.sleep(1)
             if time.time() % 3600 < 1.1:
                 break
+
+
+def _restart_ollama(cmd_raw, url):
+    if not cmd_raw:
+        print("[RECOVERY] Error: Ollama restart command is not configured in config.ini")
+        return False
+    import shlex
+    try:
+        cmd = shlex.split(cmd_raw)
+    except ValueError as e:
+        print(f"[RECOVERY] Invalid Ollama restart command syntax: {e}")
+        return False
+    
+    print(f"[RECOVERY] Restarting Ollama via: {' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, check=True)
+    except Exception as e:
+        print(f"[RECOVERY] Error restarting Ollama: {e}")
+        return False
+    
+    import httpx
+    print("[RECOVERY] Polling /api/tags for Ollama recovery...")
+    tags_url = f"{url.rstrip('/')}/api/tags"
+    
+    for _ in range(30):
+        try:
+            with httpx.Client(timeout=2.0) as client:
+                resp = client.get(tags_url)
+                if resp.status_code == 200:
+                    print("[RECOVERY] Ollama is back up!")
+                    return True
+        except Exception:
+            pass
+        time.sleep(2)
+            
+    print("[RECOVERY] Timed out waiting for Ollama to come back.")
+    return False
 
 
 def _start_service_sync():
@@ -242,7 +378,59 @@ def cmd_start():
     if not os.path.exists(_CONFIG_PATH):
         print("[CONFIG] Using defaults: 30GB storage, model management ON (no config.ini found)")
 
-    # 1. Check for unscanned models
+    # Load blacklist
+    load_blacklist()
+
+    # 1. Performance-based auto-blacklist check
+    print("[STARTUP] Fetching global performance data...")
+    perf_data = {"data": []}
+    try:
+        import httpx as _httpx_sync
+        with _httpx_sync.Client(timeout=15.0) as client:
+            resp = client.get("https://www.thinkfarm.net/api/performance")
+            resp.raise_for_status()
+            perf_data = resp.json()
+        print(f"[STARTUP] Global performance data loaded for "
+              f"{len(perf_data.get('data', []))} model(s).")
+    except Exception as e:
+        print(f"[STARTUP] Could not fetch performance data ({e}). "
+              "Skipping auto-blacklist check.")
+
+    # Compare each known model against the global peak
+    baselines_data = context_prober.load_performance_baselines()
+    all_baselines = baselines_data.get("baselines", {})
+
+    blacklisted_any = False
+    for entry in perf_data.get("data", []):
+        model_name = entry.get("model", "")
+        if not model_name:
+            continue
+        global_peak = entry.get("peak", 0)
+        n_samples = entry.get("n", 0)
+
+        local_entry = all_baselines.get(model_name, {})
+        local_slope = local_entry.get("slope")
+        if local_slope is None:
+            continue
+
+        if n_samples > _PERF_MIN_SAMPLES and \
+           local_slope < _PERF_THRESHOLD * global_peak:
+            print(f"[BLACKLIST-PERF] {model_name}: "
+                  f"baseline={local_slope:.1f} tokens/s "
+                  f"< {_PERF_THRESHOLD*100:.0f}% of global peak={global_peak:.1f} "
+                  f"(n={n_samples}) => blacklisting.")
+            add_to_blacklist(model_name)
+            blacklisted_any = True
+
+    if blacklisted_any:
+        print(f"[BLACKLIST-PERF] Models auto-blacklisted by performance. "
+              f"{len(_blacklisted_models)} total now:")
+        for m in sorted(_blacklisted_models):
+            print(f"  - {m}")
+    else:
+        print("[STARTUP] No models auto-blacklisted by performance.")
+
+    # 2. Check for unscanned models
     url = config["ollama_url"].strip() or "http://127.0.0.1:11434"
     print(f"[STARTUP] Checking for unscanned models at {url}...")
 
@@ -253,20 +441,22 @@ def cmd_start():
     if unscanned:
         print(f"[STARTUP] Found {len(unscanned)} unscanned model(s): {unscanned}")
         print("[STARTUP] Running context probing...")
-        asyncio.run(context_prober.run_context_probing(
-            url,
-            unscanned,
-            existing_limits
-        ))
-        print("[STARTUP] Probing complete.")
     else:
-        print("[STARTUP] All models already scanned.")
+        print("[STARTUP] All models already scanned. Verifying custom models...")
 
-    # 2. Initialize managed model state
+    # Run probing & custom model verification on all models
+    asyncio.run(context_prober.run_context_probing(
+        url,
+        all_models,
+        existing_limits
+    ))
+    print("[STARTUP] Probing and custom model verification complete.")
+
+    # 3. Initialize managed model state
     _ollama = OllamaClient()
     _model_manager = ModelManager(_ollama, os.environ.get("SERVER_URL", "https://app.thinkfarm.net"))
 
-    # 3. Start solo.py
+    # 4. Start solo.py
     script_dir = os.path.dirname(os.path.abspath(__file__))
     script_path = os.path.join(script_dir, "solo.py")
     project_root = os.path.dirname(script_dir)
@@ -279,7 +469,7 @@ def cmd_start():
     _write_pid()
     print(f"[STARTUP] solo.py started (PID {_server_process.pid})")
 
-    # 4. Start managed model loop in background
+    # 5. Start managed model loop in background
     config_dir = os.path.expanduser("~/.thinkfarm")
     os.makedirs(config_dir, exist_ok=True)
 
@@ -300,6 +490,31 @@ def cmd_start():
                 if rc is not None:
                     if not _stop_event.is_set():
                         print(f"\nsolo.py exited with code {rc}")
+                        if rc == 42:
+                            trigger_data = _check_slopotrigger()
+                            if trigger_data:
+                                model = trigger_data.get("model", "unknown")
+                                throughput = trigger_data.get("throughput", 0.0)
+                                action = _decide_action(model, throughput)
+                                
+                                print(f"[SLOPE-MON] Model '{model}' underperformed vs global peak. Actioned: {action}")
+                                
+                                if action == "restart_ollama":
+                                    if _restart_ollama(config.get("ollama_restart_cmd", ""), config["ollama_url"]):
+                                        print("[SLOPE-MON] Recovery successful. Restarting solo...")
+                                        _server_process = None
+                                        _start_service_sync()
+                                        continue
+                                    else:
+                                        print("\n\nServer process ended unexpectedly due to failed Ollama restart.")
+                                        break
+                                else:
+                                    add_to_blacklist(model)
+                                    print(f"[SLOPE-MON] Model {model} blacklisted. Restarting solo...")
+                                    _server_process = None
+                                    _start_service_sync()
+                                    continue
+                        
                         print("\n\nServer process ended unexpectedly.")
                         break
             time.sleep(1)

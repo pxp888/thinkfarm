@@ -31,6 +31,25 @@ class OllamaClient:
         self.base_url = ollama_url
         self.httpx_client = httpx.AsyncClient(base_url=self.base_url, timeout=30.0)
 
+    def _rewrite_model(self, model_name: str) -> str:
+        """
+        Check if the model has a valid context limit discovered by context prober.
+        If limit > 0, return the custom model name prefixed with 'thinkfarm-'.
+        Otherwise return the original model name.
+        """
+        try:
+            config_dir = Path.home() / ".thinkfarm"
+            cache_path = config_dir / "gpu_context_limits.json"
+            if cache_path.exists():
+                with open(cache_path, "r") as f:
+                    limits = json.load(f)
+                limit = limits.get(model_name)
+                if limit and limit > 0:
+                    return f"thinkfarm-{model_name}"
+        except Exception as e:
+            print(f"[OllamaClient] Error checking context limit for rewrite: {e}")
+        return model_name
+
     async def get_models(self) -> List[Dict[str, Any]]:
         """
         Get list of all available models from Ollama.
@@ -53,6 +72,8 @@ class OllamaClient:
         async with httpx.AsyncClient(base_url=self.base_url, timeout=30.0) as client:
             for model in models:
                 name = model.get("name", "")
+                if name.startswith("thinkfarm-"):
+                    continue
                 try:
                     resp = await client.post("/api/show", json={"name": name})
                     if resp.status_code == 404:
@@ -87,7 +108,12 @@ class OllamaClient:
             response = await self.httpx_client.get("/api/ps")
             response.raise_for_status()
             data = response.json()
-            return data.get("models", [])
+            models = data.get("models", [])
+            for m in models:
+                name = m.get("name", "")
+                if name.startswith("thinkfarm-"):
+                    m["name"] = name[len("thinkfarm-"):]
+            return models
         except Exception as e:
             print(f"[OllamaClient] Error fetching loaded models from /api/ps: {e}")
             return None
@@ -125,6 +151,13 @@ class OllamaClient:
         Delete a model from the local Ollama server.
         """
         try:
+            # Delete custom model if it exists
+            custom_name = f"thinkfarm-{model_name}"
+            try:
+                await self.httpx_client.request("DELETE", "/api/delete", json={"name": custom_name})
+            except Exception:
+                pass
+
             response = await self.httpx_client.request("DELETE", "/api/delete", json={"name": model_name})
             if response.status_code == 404:
                 print(f"[OllamaClient] Model {model_name} not found on server; treating as deleted.")
@@ -140,13 +173,14 @@ class OllamaClient:
         Load a model into VRAM (pre-load with keep_alive=-1 to stay loaded).
         Returns True if the request succeeded, False otherwise.
         """
+        target_model = self._rewrite_model(model_name)
         try:
-            response = await self.httpx_client.post("/api/generate", json={"model": model_name, "prompt": "hi", "keep_alive": -1, "stream": False})
+            response = await self.httpx_client.post("/api/generate", json={"model": target_model, "prompt": "hi", "keep_alive": -1, "stream": False})
             response.raise_for_status()
-            print(f"[OllamaClient] Loaded model: {model_name}")
+            print(f"[OllamaClient] Loaded model: {target_model}")
             return True
         except Exception as e:
-            print(f"[OllamaClient] Error loading model {model_name}: {e}")
+            print(f"[OllamaClient] Error loading model {target_model}: {e}")
             return False
 
     async def generate(self, model: str, prompt: str, stream: bool = False) -> Any:
@@ -154,12 +188,17 @@ class OllamaClient:
         Generate response from a model.
         Used for streaming or non-streaming requests.
         """
+        target_model = self._rewrite_model(model)
         try:
-            payload = {"model": model, "prompt": prompt, "stream": stream}
+            payload = {"model": target_model, "prompt": prompt, "stream": stream}
             endpoint = "/api/generate"
             response = await self.httpx_client.post(endpoint, json=payload)
             response.raise_for_status()
-            return response.json()
+            res = response.json()
+            if isinstance(res, dict) and "model" in res and isinstance(res["model"], str):
+                if res["model"].startswith("thinkfarm-"):
+                    res["model"] = res["model"][len("thinkfarm-"):]
+            return res
         except Exception as e:
             print(f"Ollama generate error: {e}")
             return None
@@ -169,12 +208,17 @@ class OllamaClient:
         Chat with a model.
         Used for chat-style interactions.
         """
+        target_model = self._rewrite_model(model)
         try:
-            payload = {"model": model, "messages": messages, "stream": stream}
+            payload = {"model": target_model, "messages": messages, "stream": stream}
             endpoint = "/api/chat"
             response = await self.httpx_client.post(endpoint, json=payload)
             response.raise_for_status()
-            return response.json()
+            res = response.json()
+            if isinstance(res, dict) and "model" in res and isinstance(res["model"], str):
+                if res["model"].startswith("thinkfarm-"):
+                    res["model"] = res["model"][len("thinkfarm-"):]
+            return res
         except Exception as e:
             print(f"Ollama chat error: {e}")
             return None
@@ -184,8 +228,9 @@ class OllamaClient:
         Get embedding vector for a prompt.
         Returns embedding or None if failed.
         """
+        target_model = self._rewrite_model(model)
         try:
-            payload = {"model": model, "prompt": prompt}
+            payload = {"model": target_model, "prompt": prompt}
             response = await self.httpx_client.post("/api/embeddings", json=payload)
             response.raise_for_status()
             data = response.json()

@@ -92,6 +92,7 @@ ollama: OllamaClient = None  # type: ignore[assignment]
 # ---------------------------------------------------------------------------
 is_busy: int = 0                       # Number of active or queued jobs
 stopping: bool = False                 # Graceful shutdown flag
+zero_eval_inspecting: bool = False     # Flag for zero-eval inspection
 my_models: set = set()                 # names of all Ollama models on this machine
 loaded_models: set = set()             # names of currently loaded/warm models
 
@@ -101,6 +102,56 @@ _priority_model: str = ""
 
 # GPU context limits discovered by the context prober { model_name: num_ctx }
 gpu_context_limits: dict = {}
+
+# ---------------------------------------------------------------------------
+# Slope Monitor (Performance Tracking)
+# ---------------------------------------------------------------------------
+_slope_peer_thresholds: dict = {}            # { model_name: peak / 3 }
+_consecutive_bad: dict[str, int] = {}        # { model_name: count }
+_slopemon_data_path = os.path.expanduser("~/.thinkfarm/_slopemon.json")
+_trigger_path = os.path.expanduser("~/.thinkfarm/solo_slope_trigger.json")
+_ZERO_EVAL_FILE = os.path.expanduser("~/.thinkfarm/ZERO_EVAL")
+_TRIGGER_COUNT = 3
+_SHORT_JOB_SECS = 10
+
+# ---------------------------------------------------------------------------
+# Blacklist ({model} → True)
+# ---------------------------------------------------------------------------
+_BLACKLIST_FILE = os.path.expanduser("~/.thinkfarm/blacklisted_models.json")
+_blacklisted_models: set = set()
+
+
+def load_blacklist():
+    """Load the blacklist from disk into ``_blacklisted_models``."""
+    global _blacklisted_models
+    try:
+        if os.path.exists(_BLACKLIST_FILE):
+            with open(_BLACKLIST_FILE, "r") as f:
+                _blacklisted_models = set(json.load(f))
+        else:
+            _blacklisted_models = set()
+        print(f"[BLACKLIST] Loaded {len(_blacklisted_models)} model(s) from {_BLACKLIST_FILE}.")
+    except Exception as e:
+        print(f"[BLACKLIST] Error loading blacklist: {e}")
+        _blacklisted_models = set()
+
+
+def save_blacklist() -> None:
+    """Persist the current blacklist to disk."""
+    os.makedirs(os.path.dirname(_BLACKLIST_FILE), exist_ok=True)
+    try:
+        with open(_BLACKLIST_FILE, "w") as f:
+            json.dump(sorted(_blacklisted_models), f, indent=2)
+        print(f"[BLACKLIST] Saved {len(_blacklisted_models)} model(s) to {_BLACKLIST_FILE}.")
+    except Exception as e:
+        print(f"[BLACKLIST] Error saving blacklist: {e}")
+
+
+def add_to_blacklist(model_name: str) -> None:
+    """Add *model_name* to the blacklist and persist it."""
+    _blacklisted_models.add(model_name)
+    save_blacklist()
+    print(f"[BLACKLIST] Added \"{model_name}\" to blacklist.")
 
 async def _ensure_priority_model_loaded() -> str | None:
     """Load the priority model into VRAM if it hasn't been loaded yet.
@@ -250,11 +301,11 @@ async def connect_to_server():
 
 
 def _filter_by_gpu_limit(models: list) -> list:
-    """Filter out models that have a GPU context limit of 0."""
+    """Filter out models that have a GPU context limit of 0 or are blacklisted."""
     filtered = []
     for m in models:
         name = m.get("name") if isinstance(m, dict) else m
-        if gpu_context_limits.get(name) != 0:
+        if gpu_context_limits.get(name) != 0 and name not in _blacklisted_models:
             filtered.append(m)
     return filtered
 
@@ -306,46 +357,6 @@ async def send_initial_status(websocket):
         "loaded_models": frozenset(loaded_models),
     }
     await websocket.send(json.dumps({"type": "status", **status}))
-
-
-# async def _get_changed_status():
-#     status = await get_provider_status()
-#     if status is None:
-#         return None
-#     current = {
-#         "models": frozenset(
-#             (m.get("name") if isinstance(m, dict) else m)
-#             for m in status.get("models", [])
-#         ),
-#         "loaded_models": frozenset(
-#             (m.get("name") if isinstance(m, dict) else m)
-#             for m in status.get("loaded_models", [])
-#         ),
-#     }
-#     if _previous_status is None or current != _previous_status:
-#         return status
-#     return None
-
-
-# async def _get_changed_loaded_status() -> dict | None:
-#     status = await get_loaded_models_only()
-#     if status is None:
-#         return None
-#     current = {
-#         "loaded_models": frozenset(
-#             (m.get("name") if isinstance(m, dict) else m)
-#             for m in status.get("loaded_models", [])
-#         ),
-#     }
-#     if (
-#         _previous_status is None
-#         or current.get("loaded_models") != _previous_status.get("loaded_models")
-#         or (is_busy > 0) != _previous_status.get("is_busy")
-#     ):
-#         status["models"] = _cached_full_models
-#         status["is_busy"] = is_busy > 0
-#         return status
-#     return None
 
 
 async def periodic_status_updates(websocket):
@@ -434,7 +445,7 @@ async def handle_server_message(websocket, data: dict):
 
 
 async def handle_job_published(websocket, data: dict):
-    if stopping:
+    if stopping or zero_eval_inspecting:
         return
     model = data.get("model", "")
     body = data.get("body", {})
@@ -451,6 +462,31 @@ async def handle_job_published(websocket, data: dict):
     if model not in my_models:
         return
     await _try_accept_job(websocket, data)
+
+
+# ---------------------------------------------------------------------------
+# Job execution – stream from Ollama back to server via WebSocket
+# ---------------------------------------------------------------------------
+def _rewrite_response_data(data_str: str) -> str:
+    """Rewrite any occurrences of 'thinkfarm-' model names in the response back to the original."""
+    prefix = ""
+    json_str = data_str
+    if data_str.startswith("data: "):
+        prefix = "data: "
+        json_str = data_str[6:]
+
+    if json_str.strip() == "[DONE]":
+        return data_str
+
+    try:
+        obj = json.loads(json_str)
+        if isinstance(obj, dict) and "model" in obj and isinstance(obj["model"], str):
+            if obj["model"].startswith("thinkfarm-"):
+                obj["model"] = obj["model"][len("thinkfarm-"):]
+                return prefix + json.dumps(obj)
+    except Exception:
+        pass
+    return data_str
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +517,16 @@ async def execute_job(websocket, data: dict):
                 if "name" not in body and "model" in body:
                     body = {**body, "name": body["model"]}
 
+            # Route to the custom model with a fixed context size if limit > 0
+            model_name = body.get("model")
+            if model_name and endpoint_key != "show":
+                limit = gpu_context_limits.get(model_name)
+                if limit and limit > 0:
+                    body["model"] = f"thinkfarm-{model_name}"
+                    if "options" in body and isinstance(body["options"], dict):
+                        body["options"].pop("num_ctx", None)
+                    print(f"Routing job {job_id} to custom model thinkfarm-{model_name} (fixed context size: {limit})")
+
             # Force usage statistics for OpenAI-compatible streams
             if endpoint_key.startswith("v1/") and stream:
                 if "stream_options" not in body:
@@ -495,42 +541,80 @@ async def execute_job(websocket, data: dict):
             try:
                 async with httpx.AsyncClient(base_url=ollama.base_url, timeout=None) as client:
                     if stream:
-                        async with client.stream("POST", ollama_path, json=body) as response:
-                            async for line in response.aiter_lines():
-                                if not line:
-                                    continue
-                                await websocket.send(
-                                    json.dumps({"type": "chunk", "job_id": job_id, "data": line})
-                                )
+                        batch = []
+                        sep = "\n\n" if endpoint_key.startswith("v1/") else "\n"
+                        
+                        async def flusher():
+                            while True:
                                 try:
-                                    # Handle SSE format for v1 endpoints
-                                    parse_line = line
-                                    if line.startswith("data: "):
-                                        parse_line = line[6:]
-                                    
-                                    if parse_line.strip() == "[DONE]":
-                                        continue
+                                    await asyncio.sleep(0.05)
+                                    if batch:
+                                        data_to_send = "".join(batch)
+                                        batch.clear()
+                                        await websocket.send(
+                                            json.dumps({"type": "chunk", "job_id": job_id, "data": data_to_send})
+                                        )
+                                except asyncio.CancelledError:
+                                    break
+                                except Exception as e:
+                                    print(f"Error in batch flusher: {e}")
+                                    break
 
-                                    obj = json.loads(parse_line)
+                        flusher_task = asyncio.create_task(flusher())
+                        try:
+                            async with client.stream("POST", ollama_path, json=body) as response:
+                                async for line in response.aiter_lines():
+                                    if not line:
+                                        continue
+                                    line_rewritten = _rewrite_response_data(line)
+                                    batch.append(line_rewritten + sep)
                                     
-                                    # Capture Ollama native usage
-                                    if obj.get("prompt_eval_count"):
-                                        prompt_eval_count = obj["prompt_eval_count"]
-                                    if obj.get("eval_count"):
-                                        eval_count = obj["eval_count"]
+                                    try:
+                                        # Handle SSE format for v1 endpoints
+                                        parse_line = line
+                                        if line.startswith("data: "):
+                                            parse_line = line[6:]
                                         
-                                    # Capture OpenAI compatible usage
-                                    if "usage" in obj and obj["usage"]:
-                                        u = obj["usage"]
-                                        if u.get("prompt_tokens"):
-                                            prompt_eval_count = u["prompt_tokens"]
-                                        if u.get("completion_tokens"):
-                                            eval_count = u["completion_tokens"]
-                                except Exception:
-                                    pass
+                                        if parse_line.strip() == "[DONE]":
+                                            continue
+
+                                        obj = json.loads(parse_line)
+                                        
+                                        # Capture Ollama native usage
+                                        if obj.get("prompt_eval_count"):
+                                            prompt_eval_count = obj["prompt_eval_count"]
+                                        if obj.get("eval_count"):
+                                            eval_count = obj["eval_count"]
+                                            
+                                        # Capture OpenAI compatible usage
+                                        if "usage" in obj and obj["usage"]:
+                                            u = obj["usage"]
+                                            if u.get("prompt_tokens"):
+                                                prompt_eval_count = u["prompt_tokens"]
+                                            if u.get("completion_tokens"):
+                                                eval_count = u["completion_tokens"]
+                                    except Exception:
+                                        pass
+                        finally:
+                            flusher_task.cancel()
+                            try:
+                                await flusher_task
+                            except asyncio.CancelledError:
+                                pass
+                            
+                            # Final flush of any remaining tokens
+                            if batch:
+                                data_to_send = "".join(batch)
+                                batch.clear()
+                                await websocket.send(
+                                    json.dumps({"type": "chunk", "job_id": job_id, "data": data_to_send})
+                                )
                     else:
                         response = await client.post(ollama_path, json=body)
                         response_data = response.json()
+                        if isinstance(response_data, dict) and "model" in response_data and isinstance(response_data["model"], str):
+                            if response_data["model"].startswith("thinkfarm-"):
+                                response_data["model"] = response_data["model"][len("thinkfarm-"):]
                         if "prompt_eval_count" in response_data:
                             prompt_eval_count = response_data.get("prompt_eval_count", 0)
                             eval_count = response_data.get("eval_count", 0)
@@ -560,6 +644,37 @@ async def execute_job(websocket, data: dict):
                 )
                 print(f"Job {job_id} completed — sending job_done")
 
+                # Zero-eval inspection check
+                if eval_count == 0 and endpoint_key in ("chat", "generate", "v1/chat/completions", "v1/completions"):
+                    asyncio.create_task(_run_zero_eval_inspection(model_name or _last_model))
+
+                # Slope Monitor Check
+                actual_throughput = eval_count / (total_duration / 1e9) if total_duration > 0 else 0.0
+                
+                if total_duration >= _SHORT_JOB_SECS * 1e9 and model_name in _slope_peer_thresholds:
+                    threshold = _slope_peer_thresholds[model_name]
+                    if actual_throughput < threshold:
+                        _consecutive_bad[model_name] = _consecutive_bad.get(model_name, 0) + 1
+                        print(f"[SLOPE-MON] {model_name}: throughput={actual_throughput:.1f} "
+                              f"< threshold={threshold:.1f} ({_consecutive_bad[model_name]}/{_TRIGGER_COUNT})")
+                    else:
+                        if _consecutive_bad.get(model_name, 0) > 0:
+                            print(f"[SLOPE-MON] {model_name}: recovered — throughput="
+                                  f"{actual_throughput:.1f} >= threshold={threshold:.1f}")
+                        _consecutive_bad[model_name] = 0
+                
+                if _consecutive_bad.get(model_name, 0) >= _TRIGGER_COUNT and model_name in _slope_peer_thresholds:
+                    details = {
+                        "model": model_name,
+                        "throughput": round(actual_throughput, 2),
+                        "threshold": round(threshold, 2)
+                    }
+                    with open(_trigger_path, "w") as f:
+                        json.dump(details, f)
+                    print(f"[SLOPE-MON] *** {model_name} triggered! Shutting down...")
+                    global stopping
+                    stopping = True
+
             except Exception as e:
                 print(f"Error executing job {job_id}: {e}")
                 await websocket.send(
@@ -578,6 +693,44 @@ async def execute_job(websocket, data: dict):
         is_busy -= 1
         if status_update_event is not None:
             status_update_event.set()
+
+
+_zero_eval_lock = asyncio.Lock()
+
+async def _run_zero_eval_inspection(model_name: str):
+    if _zero_eval_lock.locked():
+        return
+    async with _zero_eval_lock:
+        global zero_eval_inspecting, is_busy
+        zero_eval_inspecting = True
+        is_busy += 1
+        try:
+            while True:
+                if stopping:
+                    break
+                print(f"[ZERO-EVAL] Testing model {model_name} with 'hello' prompt...")
+                try:
+                    result = await ollama.generate(model_name, "hello", stream=False)
+                    if result:
+                        print("[ZERO-EVAL] Test succeeded, returning to operation.")
+                        break
+                except Exception as e:
+                    print(f"[ZERO-EVAL] Test failed: {e}")
+                
+                print("[ZERO-EVAL] Test failed. Writing zero-eval file and waiting 60s...")
+                try:
+                    with open(_ZERO_EVAL_FILE, "w") as f:
+                        json.dump({"model": model_name, "timestamp": datetime.now().isoformat()}, f)
+                except Exception as e:
+                    print(f"[ZERO-EVAL] Could not write trigger file: {e}")
+                
+                for _ in range(60):
+                    if stopping:
+                        break
+                    await asyncio.sleep(1)
+        finally:
+            zero_eval_inspecting = False
+            is_busy -= 1
 
 
 async def execute_job_with_heartbeat_reset(websocket, data: dict):
@@ -654,7 +807,7 @@ async def main():
     load_config()
     if not PROVIDER_ID:
         print("[ERROR] Cannot start provider: PROVIDER_ID is missing in config.ini (searched in ~/.thinkfarm/)")
-        return False
+        return False, 1
 
     # Load cached GPU context limits
     config_dir = os.path.expanduser("~/.thinkfarm")
@@ -670,6 +823,21 @@ async def main():
     else:
         print(f"No cache file found at {cache_path} - starting fresh.")
         gpu_context_limits = {}
+
+    # Load blacklist
+    load_blacklist()
+
+    # Load slopemon data
+    try:
+        with open(_slopemon_data_path, "r") as f:
+            data = json.load(f)
+        for model_name, info in data.get("models", {}).items():
+            peak = info.get("peak", 0)
+            if peak > 0:
+                _slope_peer_thresholds[model_name] = peak / 3
+        print(f"[SLOPE-MON] Loaded {len(_slope_peer_thresholds)} thresholds.")
+    except (FileNotFoundError, Exception):
+        print("[SLOPE-MON] No slopemon data — monitoring disabled.")
 
     # Fresh Ollama client
     global ollama
@@ -718,9 +886,14 @@ async def main():
 
     print("All jobs finished. Shutting down Ollama client.")
     await ollama.close()
-    return True
+    
+    if any(count >= _TRIGGER_COUNT for count in _consecutive_bad.values()):
+        return False, 42
+    return True, 0
 
 
 if __name__ == "__main__":
-    success = asyncio.run(main())
+    success, code = asyncio.run(main())
+    if code == 42:
+        sys.exit(42)
     sys.exit(0 if success else 1)

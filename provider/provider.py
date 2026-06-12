@@ -7,6 +7,7 @@ Configuration and status only — no log output.
 
 import asyncio
 import configparser
+import json
 import multiprocessing
 import os
 import subprocess
@@ -34,6 +35,9 @@ load_dotenv()
 
 _CONFIG_PATH = os.path.expanduser("~/.thinkfarm/config.ini")
 _PRIORITY_MODEL_PATH = os.path.expanduser("~/.thinkfarm/priority_model.txt")
+_SLOPEMON_DATA_PATH = os.path.expanduser("~/.thinkfarm/_slopemon.json")
+_TRIGGER_PATH = os.path.expanduser("~/.thinkfarm/solo_slope_trigger.json")
+_ZERO_EVAL_FILE = os.path.expanduser("~/.thinkfarm/ZERO_EVAL")
 
 
 def _write_priority_model(model: str) -> None:
@@ -45,6 +49,92 @@ def _write_priority_model(model: str) -> None:
     with open(_PRIORITY_MODEL_PATH, "w") as f:
         f.write(model)
     print(f"[MGMT] Wrote priority model to {_PRIORITY_MODEL_PATH}: {model}")
+
+
+# ---------------------------------------------------------------------------
+# Blacklist
+# ---------------------------------------------------------------------------
+_BLACKLIST_FILE = os.path.expanduser("~/.thinkfarm/blacklisted_models.json")
+_blacklisted_models: set = set()
+
+
+def load_blacklist() -> None:
+    """Load the blacklist from disk into ``_blacklisted_models``."""
+    global _blacklisted_models
+    try:
+        if os.path.exists(_BLACKLIST_FILE):
+            with open(_BLACKLIST_FILE, "r") as f:
+                _blacklisted_models = set(json.load(f))
+        else:
+            _blacklisted_models = set()
+        print(f"[BLACKLIST] Loaded {len(_blacklisted_models)} model(s) from {_BLACKLIST_FILE}.")
+    except Exception as e:
+        print(f"[BLACKLIST] Error loading blacklist: {e}")
+        _blacklisted_models = set()
+
+
+def save_blacklist() -> None:
+    """Persist the current blacklist to disk."""
+    os.makedirs(os.path.dirname(_BLACKLIST_FILE), exist_ok=True)
+    try:
+        with open(_BLACKLIST_FILE, "w") as f:
+            json.dump(sorted(_blacklisted_models), f, indent=2)
+        print(f"[BLACKLIST] Saved {len(_blacklisted_models)} model(s) to {_BLACKLIST_FILE}.")
+    except Exception as e:
+        print(f"[BLACKLIST] Error saving blacklist: {e}")
+
+
+def add_to_blacklist(model_name: str) -> None:
+    """Add *model_name* to the blacklist and persist it."""
+    global _blacklisted_models
+    _blacklisted_models.add(model_name)
+    save_blacklist()
+    print(f"[BLACKLIST] Added \"{model_name}\" to blacklist.")
+
+# ---------------------------------------------------------------------------
+# Performance-based auto-blacklist (check against global peak)
+# ---------------------------------------------------------------------------
+_PERF_THRESHOLD = 1 / 3   # blacklisted if baseline < 1/3 * peak
+_PERF_MIN_SAMPLES = 30      # need > 30 samples before trusting the peak
+
+
+def _blacklist_underperforming(model: str, baseline_slope: float, global_peak: float) -> bool:
+    """Blacklist a model if its local baseline is < threshold * global peak.
+    
+    Returns True if the model was blacklisted, False otherwise."""
+    threshold_value = _PERF_THRESHOLD * global_peak
+    if baseline_slope < threshold_value:
+        print(f"[BLACKLIST-PERF] {model}: baseline={baseline_slope:.1f} "
+              f"tokens/s < {_PERF_THRESHOLD*100:.0f}% of global peak={global_peak:.1f} "
+              f"=\u003e blacklisting.")
+        add_to_blacklist(model)
+        return True
+    return False
+
+
+def _check_slopotrigger() -> dict | None:
+    try:
+        if os.path.exists(_TRIGGER_PATH):
+            with open(_TRIGGER_PATH, "r") as f:
+                data = json.load(f)
+            os.remove(_TRIGGER_PATH)
+            return data
+    except Exception as e:
+        print(f"[SLOPE-MON] Error checking trigger file: {e}")
+    return None
+
+def _decide_action(triggered_model: str, trigger_throughput: float) -> str:
+    try:
+        baselines_data = context_prober.load_performance_baselines()
+        all_baselines = baselines_data.get("baselines", {})
+        local_entry = all_baselines.get(triggered_model, {})
+        local_slope = local_entry.get("slope")
+        
+        if local_slope and trigger_throughput < 0.5 * local_slope:
+            return "restart_ollama"
+    except Exception as e:
+        print(f"[SLOPE-MON] Error in _decide_action: {e}")
+    return "blacklist_and_restart"
 
 
 class ProviderSignals(QObject):
@@ -87,17 +177,27 @@ class ProviderGUI(QMainWindow):
         self._load_config()
         self.setup_tray()
 
+    def _kill_ollama_process(self):
+        if hasattr(self, '_ollama_process') and self._ollama_process is not None:
+            try:
+                if os.name == 'nt':
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self._ollama_process.pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                else:
+                    self._ollama_process.terminate()
+                self._ollama_process.wait(timeout=5)
+            except Exception as e:
+                print(f"[MGMT] Error terminating ollama process: {e}")
+            self._ollama_process = None
+
     def restart_ollama_server(self):
         print("[MGMT] Restarting/checking internal ollama server...")
         
         # Terminate existing child process if running
-        if hasattr(self, '_ollama_process') and self._ollama_process is not None:
-            try:
-                self._ollama_process.terminate()
-                self._ollama_process.wait(timeout=5)
-            except Exception as e:
-                print(f"[MGMT] Error terminating old ollama process: {e}")
-            self._ollama_process = None
+        self._kill_ollama_process()
             
         if hasattr(self, '_ollama_log_file') and self._ollama_log_file is not None:
             try:
@@ -230,6 +330,28 @@ class ProviderGUI(QMainWindow):
                 if config.has_section("provider"):
                     auto_manage = config.getboolean("provider", "auto_manage", fallback=False)
                     limit_gb = float(config.get("provider", "managed_storage_gb", fallback="30"))
+
+                # Fetch and write slopemon state
+                try:
+                    import httpx
+                    from datetime import datetime
+                    with httpx.Client(timeout=15.0) as client:
+                        resp = client.get("https://www.thinkfarm.net/api/performance")
+                        resp.raise_for_status()
+                        perf_data = resp.json()
+
+                    state = {"updated_at": datetime.now().isoformat(), "models": {}}
+                    for entry in perf_data.get("data", []):
+                        name = entry.get("model", "")
+                        peak = entry.get("peak", 0)
+                        n_samples = entry.get("n", 0)
+                        if n_samples > _PERF_MIN_SAMPLES and peak > 0:
+                            state["models"][name] = {"peak": round(peak, 1)}
+
+                    with open(_SLOPEMON_DATA_PATH, "w") as f:
+                        json.dump(state, f, indent=2)
+                except Exception as e:
+                    print(f"[MGMT-LOOP] Error fetching /performance for slopemon: {e}")
 
                 if auto_manage and limit_gb > 0:
                     # Run optimization
@@ -373,7 +495,7 @@ class ProviderGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Provider v20")
+        self.info_label = QLabel("Provider v26")
         self.info_label.setStyleSheet("color: #8e8e93; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -503,6 +625,14 @@ class ProviderGUI(QMainWindow):
             self.status_text.setText("SYSTEM STOPPED")
             self.status_text.setStyleSheet("color: #8e8e93; font-size: 12px; font-weight: 600; border: none; margin-left: 5px;")
             self.status_dot.setStyleSheet("color: #8e8e93; font-size: 22px; border: none;")
+        elif state == "stopped_error":
+            self.start_btn.setEnabled(True)
+            self.start_btn.setStyleSheet("QPushButton { background-color: #548889; color: white; border: none; font-weight: 500; font-size: 14px; }")
+            self.stop_btn.setEnabled(False)
+            self.stop_btn.setStyleSheet("QPushButton { background-color: #d2d2d7; color: #8e8e93; border: none; font-weight: 500; font-size: 14px; }")
+            self.status_text.setText("STOPPED - ERROR")
+            self.status_text.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: 600; border: none; margin-left: 5px;")
+            self.status_dot.setStyleSheet("color: #e74c3c; font-size: 22px; border: none;")
 
     def _handle_show_message(self, msg_type, title, message):
         if msg_type == "info":
@@ -512,14 +642,89 @@ class ProviderGUI(QMainWindow):
         elif msg_type == "error":
             QMessageBox.critical(self, title, message)
 
+    def _wait_for_ollama_ready(self):
+        """Poll Ollama's /api/tags endpoint until it responds or times out."""
+        import httpx
+        print("[RECOVERY] Polling /api/tags for Ollama recovery...")
+        url = self._ollama_url or "http://127.0.0.1:11434"
+        tags_url = f"{url.rstrip('/')}/api/tags"
+        
+        for _ in range(30):
+            try:
+                with httpx.Client(timeout=2.0) as client:
+                    resp = client.get(tags_url)
+                    if resp.status_code == 200:
+                        print("[RECOVERY] Ollama is back up!")
+                        return True
+            except Exception:
+                pass
+            time.sleep(2)
+            
+        print("[RECOVERY] Timed out waiting for Ollama to come back.")
+        return False
+
+    def _restart_ollama(self):
+        self.restart_ollama_server()
+        return self._wait_for_ollama_ready()
+
     # ── start / stop ────────────────────────────────────────────
     def start_service(self):
         """Orchestrate startup: probe context if needed, then start solo.py."""
         self.start_btn.setEnabled(False)
         self._stop_event.clear()
+        self.signals.ui_state_signal.emit("probing")
 
         def _startup_logic():
             try:
+                # 0. Performance-based auto-blacklist check
+                print("[STARTUP] Fetching global performance data...")
+                perf_data = {"data": []}
+                try:
+                    import httpx as _httpx_sync
+                    with _httpx_sync.Client(timeout=15.0) as client:
+                        resp = client.get("https://www.thinkfarm.net/api/performance")
+                        resp.raise_for_status()
+                        perf_data = resp.json()
+                    print(f"[STARTUP] Global performance data loaded for "
+                          f"{len(perf_data.get('data', []))} model(s).")
+                except Exception as e:
+                    print(f"[STARTUP] Could not fetch performance data ({e}). "
+                          "Skipping auto-blacklist check.")
+
+                # Compare each known model against the global peak
+                baselines_data = context_prober.load_performance_baselines()
+                all_baselines = baselines_data.get("baselines", {})
+
+                blacklisted_any = False
+                for entry in perf_data.get("data", []):
+                    model_name = entry.get("model", "")
+                    if not model_name:
+                        continue
+                    global_peak = entry.get("peak", 0)
+                    n_samples = entry.get("n", 0)
+
+                    local_entry = all_baselines.get(model_name, {})
+                    local_slope = local_entry.get("slope")
+                    if local_slope is None:
+                        continue
+
+                    if n_samples > _PERF_MIN_SAMPLES and \
+                       local_slope < _PERF_THRESHOLD * global_peak:
+                        print(f"[BLACKLIST-PERF] {model_name}: "
+                              f"baseline={local_slope:.1f} tokens/s "
+                              f"< {_PERF_THRESHOLD*100:.0f}% of global peak={global_peak:.1f} "
+                              f"(n={n_samples}) =\u003e blacklisting.")
+                        add_to_blacklist(model_name)
+                        blacklisted_any = True
+
+                if blacklisted_any:
+                    print(f"[BLACKLIST-PERF] Models auto-blacklisted by performance. "
+                          f"{len(_blacklisted_models)} total now:")
+                    for m in sorted(_blacklisted_models):
+                        print(f"  - {m}")
+                else:
+                    print("[STARTUP] No models auto-blacklisted by performance.")
+
                 # 1. Check for unscanned models
                 url = self._ollama_url
                 print(f"[STARTUP] Checking for unscanned models at {url}...")
@@ -531,15 +736,22 @@ class ProviderGUI(QMainWindow):
                 
                 if unscanned:
                     print(f"[STARTUP] Found {len(unscanned)} unscanned model(s): {unscanned}")
+
+                # Run probing & custom model verification on all models;
+                # _probe_new_models returns the updated limits (existing+new)
+                updated_limits = asyncio.run(context_prober.run_context_probing(
+                    url,
+                    all_models,
+                    existing_limits
+                ))
+
+                # Emit "probing" whenever any model was actually probed,
+                # whether for new context limits or baseline-only setup.
+                newly_probed = set(updated_limits.keys()) - set(existing_limits.keys())
+                if unscanned or newly_probed:
                     self.signals.ui_state_signal.emit("probing")
-                    
-                    # Run probing
-                    asyncio.run(context_prober.run_context_probing(
-                        url,
-                        unscanned,
-                        existing_limits
-                    ))
-                    print("[STARTUP] Probing complete.")
+
+                print("[STARTUP] Probing and custom model verification complete.")
 
                 # 2. Start solo.py via main thread
                 self.signals.trigger_actual_start.emit()
@@ -573,13 +785,74 @@ class ProviderGUI(QMainWindow):
                 )
 
             def check_startup():
+                started = False
                 for _ in range(50):
                     if self._server_process and self._server_process.poll() is None:
                         self.signals.ui_state_signal.emit("started")
-                        return
+                        started = True
+                        break
                     if self._stop_event.is_set():
                         return
                     time.sleep(0.1)
+                    
+                if not started:
+                    self.signals.ui_state_signal.emit("stopped")
+                    return
+                    
+                zero_eval_restarts = 0
+                while self._server_process and self._server_process.poll() is None:
+                    if self._stop_event.is_set():
+                        break
+                    try:
+                        if os.path.exists(_ZERO_EVAL_FILE):
+                            os.remove(_ZERO_EVAL_FILE)
+                            zero_eval_restarts += 1
+                            if zero_eval_restarts > 3:
+                                print("[MGMT] Max zero eval restarts reached. Stopping solo.py.")
+                                self.signals.ui_state_signal.emit("stopped_error")
+                                if self._server_process:
+                                    self._server_process.terminate()
+                                    self._server_process = None
+                                break
+                            else:
+                                print(f"[MGMT] Zero eval detected. Restarting Ollama (attempt {zero_eval_restarts}/3).")
+                                self.restart_ollama_server()
+                    except Exception as e:
+                        print(f"[MGMT] Error checking zero eval file: {e}")
+                    time.sleep(1)
+
+                if self._server_process:
+                    self._server_process.wait()
+
+                if self._stop_event.is_set():
+                    return  # Handled by stop_service
+                    
+                code = self._server_process.returncode
+                self._server_process = None
+                
+                if code == 42:
+                    trigger_data = _check_slopotrigger()
+                    if trigger_data:
+                        model = trigger_data.get("model", "unknown")
+                        throughput = trigger_data.get("throughput", 0.0)
+                        action = _decide_action(model, throughput)
+                        
+                        self.signals.show_message.emit("warning", "Performance Alert",
+                            f"Model '{model}' underperformed vs global peak.\nActioned: {action}")
+                            
+                        if action == "restart_ollama":
+                            self.signals.ui_state_signal.emit("probing")
+                            if self._restart_ollama():
+                                print("[SLOPE-MON] Recovery successful. Restarting solo...")
+                                self.signals.trigger_actual_start.emit()
+                            else:
+                                self.signals.ui_state_signal.emit("stopped")
+                        else:
+                            add_to_blacklist(model)
+                            print(f"[SLOPE-MON] Model {model} blacklisted. Restarting solo...")
+                            self.signals.trigger_actual_start.emit()
+                else:
+                    self.signals.ui_state_signal.emit("stopped")
 
             threading.Thread(target=check_startup, daemon=True).start()
         except Exception as e:
@@ -695,12 +968,7 @@ class ProviderGUI(QMainWindow):
         if self._server_process is not None:
             self.stop_service()
             
-        if hasattr(self, '_ollama_process') and self._ollama_process is not None:
-            try:
-                self._ollama_process.terminate()
-                self._ollama_process.wait(timeout=5)
-            except Exception as e:
-                print(f"Error terminating ollama process: {e}")
+        self._kill_ollama_process()
                 
         if hasattr(self, '_ollama_log_file') and self._ollama_log_file is not None:
             try:
