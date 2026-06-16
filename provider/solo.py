@@ -95,6 +95,8 @@ stopping: bool = False                 # Graceful shutdown flag
 zero_eval_inspecting: bool = False     # Flag for zero-eval inspection
 my_models: set = set()                 # names of all Ollama models on this machine
 loaded_models: set = set()             # names of currently loaded/warm models
+job_counter: int = 0                   # Counter for completed jobs since last reconnect
+reconnect_requested: bool = False      # Flag to trigger immediate reconnect
 
 # Priority model written by baseprovider.py (_managed_model_loop)
 _PRIORITY_MODEL_PATH = os.path.expanduser("~/.thinkfarm/priority_model.txt")
@@ -213,9 +215,6 @@ _last_activity_time: float = 0.0
 # Reference to the live WebSocket so execute_job can send chunks
 _ws_ref = None
 
-# Job execution counter for websocket reconnection
-jobs_completed_since_connect: int = 0
-
 # Active inference tasks by job_id
 active_tasks: dict = {}
 
@@ -286,20 +285,24 @@ _ENDPOINT_MAP = {
 # ---------------------------------------------------------------------------
 async def connect_to_server():
     """Maintain a persistent WebSocket connection to the central server."""
-    global _ws_ref, jobs_completed_since_connect
+    global _ws_ref, reconnect_requested, job_counter
     while True:
         try:
+            job_counter = 0  # Reset counter on new connection
             ws_url = f"{SERVER_WS_URL}{PROVIDER_ID}"
             async with websockets.connect(ws_url) as websocket:
-                jobs_completed_since_connect = 0
                 _ws_ref = websocket
                 print(f"Connected to server: {ws_url}")
                 await send_initial_status(websocket)
                 asyncio.create_task(periodic_status_updates(websocket))
                 await listen_for_server_messages(websocket)
         except Exception as e:
-            print(f"WebSocket error: {e}, reconnecting in 5 s…")
-            await asyncio.sleep(5)
+            if reconnect_requested:
+                reconnect_requested = False
+                print("[RECONNECT] Reconnecting WebSocket immediately (planned refresh after 30 jobs)...")
+            else:
+                print(f"WebSocket error: {e}, reconnecting in 5 s…")
+                await asyncio.sleep(5)
         finally:
             _ws_ref = None
 
@@ -484,34 +487,6 @@ async def execute_job(websocket, data: dict):
             ollama_path = _ENDPOINT_MAP.get(endpoint_key, "/api/chat")
             stream = body.get("stream", True)
 
-            routing_header = data.get("routing_header")
-            if not routing_header:
-                print(f"[WARN] Job {job_id} has no routing_header.")
-
-            chunk_queue = asyncio.Queue()
-
-            async def stream_poster():
-                stream_url = f"{SERVER_URL}/api/jobs/{job_id}/stream"
-                headers = {"X-Target-Server-IP": routing_header} if routing_header else {}
-                
-                try:
-                    async with httpx.AsyncClient(timeout=None) as post_client:
-                        while True:
-                            chunk = await chunk_queue.get()
-                            if chunk is None:
-                                # Send EOF chunk (empty body)
-                                await post_client.post(stream_url, content=b"", headers=headers)
-                                break
-                            
-                            # Send chunk as standard POST body
-                            body = chunk.encode("utf-8") if isinstance(chunk, str) else chunk
-                            await post_client.post(stream_url, content=body, headers=headers)
-                        print(f"REST Stream for job {job_id} POST completed.")
-                except Exception as post_err:
-                    print(f"Error posting REST stream for job {job_id}: {post_err}")
-
-            post_task = asyncio.create_task(stream_poster())
-
             # Normalise embed bodies
             if endpoint_key in ("embed", "embeddings"):
                 stream = False
@@ -560,7 +535,9 @@ async def execute_job(websocket, data: dict):
                                 if batch:
                                     data_to_send = "".join(batch)
                                     batch.clear()
-                                    await chunk_queue.put(data_to_send)
+                                    await websocket.send(
+                                        json.dumps({"type": "chunk", "job_id": job_id, "data": data_to_send})
+                                    )
 
                         flusher_task = asyncio.create_task(batch_flusher())
                         try:
@@ -607,11 +584,9 @@ async def execute_job(websocket, data: dict):
                             if batch:
                                 data_to_send = "".join(batch)
                                 batch.clear()
-                                await chunk_queue.put(data_to_send)
-
-                            # Signal EOF to stream poster
-                            await chunk_queue.put(None)
-                            await post_task
+                                await websocket.send(
+                                    json.dumps({"type": "chunk", "job_id": job_id, "data": data_to_send})
+                                )
                     else:
                         response = await client.post(ollama_path, json=body)
                         response_data = response.json()
@@ -625,30 +600,27 @@ async def execute_job(websocket, data: dict):
                             u = response_data["usage"]
                             prompt_eval_count = u.get("prompt_tokens", 0)
                             eval_count = u.get("completion_tokens", 0)
-
-                        await chunk_queue.put(json.dumps(response_data))
-                        # Signal EOF to stream poster
-                        await chunk_queue.put(None)
-                        await post_task
+                        await websocket.send(
+                            json.dumps(
+                                {"type": "chunk", "job_id": job_id, "data": json.dumps(response_data)}
+                            )
+                        )
 
                 total_duration = int((datetime.now() - end_start).total_seconds() * 1e9)
 
-                # Send POST to done endpoint
-                done_payload = {
-                    "provider_id": PROVIDER_ID,
-                    "prompt_eval_count": prompt_eval_count,
-                    "eval_count": eval_count,
-                    "total_duration": total_duration,
-                    "is_busy": is_busy > 1
-                }
-                try:
-                    async with httpx.AsyncClient() as done_client:
-                        resp = await done_client.post(f"{SERVER_URL}/api/jobs/{job_id}/done", json=done_payload)
-                        print(f"Job {job_id} done request status: {resp.status_code}")
-                except Exception as done_err:
-                    print(f"Error sending done request for job {job_id}: {done_err}")
-
-                print(f"Job {job_id} completed — metrics submitted")
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "job_done",
+                            "job_id": job_id,
+                            "prompt_eval_count": prompt_eval_count,
+                            "eval_count": eval_count,
+                            "total_duration": total_duration,
+                            "is_busy": is_busy > 1,
+                        }
+                    )
+                )
+                print(f"Job {job_id} completed — sending job_done")
 
                 # Zero-eval inspection check
                 if eval_count == 0 and endpoint_key in ("chat", "generate", "v1/chat/completions", "v1/completions"):
@@ -665,8 +637,8 @@ async def execute_job(websocket, data: dict):
                               f"< threshold={threshold:.1f} ({_consecutive_bad[model_name]}/{_TRIGGER_COUNT})")
                     else:
                         if _consecutive_bad.get(model_name, 0) > 0:
-                                print(f"[SLOPE-MON] {model_name}: recovered — throughput="
-                                      f"{actual_throughput:.1f} >= threshold={threshold:.1f}")
+                            print(f"[SLOPE-MON] {model_name}: recovered — throughput="
+                                  f"{actual_throughput:.1f} >= threshold={threshold:.1f}")
                         _consecutive_bad[model_name] = 0
                 
                 if _consecutive_bad.get(model_name, 0) >= _TRIGGER_COUNT and model_name in _slope_peer_thresholds:
@@ -683,26 +655,18 @@ async def execute_job(websocket, data: dict):
 
             except Exception as e:
                 print(f"Error executing job {job_id}: {e}")
-                # Signal EOF to stream poster if we got here mid-stream
-                try:
-                    await chunk_queue.put(None)
-                    await post_task
-                except Exception:
-                    pass
-
-                # Send POST to done endpoint even on error
-                done_payload = {
-                    "provider_id": PROVIDER_ID,
-                    "prompt_eval_count": 0,
-                    "eval_count": 0,
-                    "total_duration": 0,
-                    "is_busy": is_busy > 1
-                }
-                try:
-                    async with httpx.AsyncClient() as done_client:
-                        await done_client.post(f"{SERVER_URL}/api/jobs/{job_id}/done", json=done_payload)
-                except Exception as done_err:
-                    print(f"Error sending done request on failure for job {job_id}: {done_err}")
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "job_done",
+                            "job_id": job_id,
+                            "prompt_eval_count": 0,
+                            "eval_count": 0,
+                            "total_duration": 0,
+                            "is_busy": is_busy > 1,
+                        }
+                    )
+                )
     finally:
         is_busy -= 1
         if status_update_event is not None:
@@ -749,7 +713,7 @@ async def _run_zero_eval_inspection(model_name: str):
 
 async def execute_job_with_heartbeat_reset(websocket, data: dict):
     """Wrapper that resets the heartbeat timer before executing a job."""
-    global _last_activity_time, _last_model, jobs_completed_since_connect
+    global _last_activity_time, _last_model, job_counter, reconnect_requested
     _last_activity_time = asyncio.get_event_loop().time()
 
     # If this is a chat/generate job, remember the model
@@ -766,14 +730,20 @@ async def execute_job_with_heartbeat_reset(websocket, data: dict):
             active_tasks.pop(job_id, None)
         # Mark completion time so heartbeat waits another full interval
         _last_activity_time = asyncio.get_event_loop().time()
-        
-        jobs_completed_since_connect += 1
-        if jobs_completed_since_connect >= 20:
-            print(f"Reached 20 jobs ({jobs_completed_since_connect}), closing websocket to reconnect...")
-            try:
-                await websocket.close()
-            except Exception as e:
-                print(f"Error closing websocket: {e}")
+
+        # Increment job counter and check for scheduled reconnection
+        job_counter += 1
+        print(f"[RECONNECT] Job completed. Job count since last reconnect: {job_counter}/30. Active/queued jobs: {is_busy}")
+        if job_counter >= 30:
+            if is_busy == 0:
+                reconnect_requested = True
+                print("[RECONNECT] 30 jobs reached and provider is idle. Initiating WebSocket reconnection...")
+                try:
+                    await websocket.close()
+                except Exception as e:
+                    print(f"[RECONNECT] Error closing WebSocket: {e}")
+            else:
+                print(f"[RECONNECT] 30 jobs reached, but provider is busy ({is_busy} jobs). Reconnection deferred.")
 
 
 async def _heartbeat_loop():
