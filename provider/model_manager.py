@@ -1,8 +1,11 @@
 import asyncio
+import configparser
 import json
 import os
 import platform
 import random
+import re
+import shutil
 import subprocess
 import httpx
 from typing import Dict, List, Optional, Set
@@ -13,6 +16,8 @@ import context_prober
 # Constants & Paths
 # ---------------------------------------------------------------------------
 _CONFIG_DIR = Path.home() / ".thinkfarm"
+_CONFIG_PATH = _CONFIG_DIR / "config.ini"
+_SLOPEMON_DATA_PATH = _CONFIG_DIR / "_slopemon.json"
 _MANIFEST_NAME_FILE = _CONFIG_DIR / "managed_models_names.json"
 _USER_MODELS_FILE = _CONFIG_DIR / "user_models.json"
 _PFX = "[MODEL-MGMT]"
@@ -76,7 +81,215 @@ class ModelManager:
         "Q4_0_expert": 0.5625,
     }
 
+    def _get_gpu_bandwidth_from_name(self, gpu_name: str) -> Optional[float]:
+        """Look up GPU memory bandwidth in GB/s based on the device name."""
+        name_lower = gpu_name.lower()
+        
+        # Mapping table of common GPUs to their memory bandwidth in GB/s
+        mappings = {
+            # RTX 50 series
+            "5090": 1700.0,
+            "5080": 1000.0,
+            
+            # RTX 40 series
+            "4090": 1008.0,
+            "4080": 716.8,
+            "4070 ti": 504.0,
+            "4070": 504.0,
+            "4060 ti": 288.0,
+            "4060": 272.0,
 
+            # RTX 30 series
+            "3090 ti": 1008.0,
+            "3090": 936.0,
+            "3080 ti": 912.0,
+            "3080": 760.0,
+            "3070 ti": 608.0,
+            "3070": 448.0,
+            "3060 ti": 448.0,
+            "3060": 360.0,
+            
+            # Enterprise / Data Center CUDA
+            "a100": 1555.0,
+            "a800": 1555.0,
+            "h100": 3350.0,
+            "h800": 3350.0,
+            "a10g": 600.0,
+            "a30": 933.0,
+            "a40": 696.0,
+            "t4": 320.0,
+            "v100": 900.0,
+            "p100": 732.0,
+
+            # AMD ROCm / Radeon
+            "mi300": 5300.0,
+            "mi250": 3200.0,
+            "mi210": 1600.0,
+            "7900 xtx": 960.0,
+            "7900 xt": 800.0,
+            "7800 xt": 624.0,
+            "7700 xt": 432.0,
+            "6900 xt": 512.0,
+            "6800 xt": 512.0,
+            
+            # Apple Silicon Unified Memory Bandwidths
+            "m1 ultra": 800.0,
+            "m2 ultra": 800.0,
+            "m3 ultra": 800.0,
+            "m1 max": 400.0,
+            "m2 max": 400.0,
+            "m3 max": 300.0,
+            "m1 pro": 200.0,
+            "m2 pro": 200.0,
+            "m3 pro": 150.0,
+            "m1": 68.25,
+            "m2": 100.0,
+            "m3": 100.0,
+            "m4": 150.0,
+        }
+
+        for pattern, bw in mappings.items():
+            if pattern in name_lower:
+                return bw
+
+        return None
+
+    def get_gpu_specs(self) -> tuple[int, float]:
+        """Detect total VRAM in bytes and estimated memory bandwidth in GB/s."""
+        total_vram = self.get_total_vram()
+        if total_vram == 0:
+            return 0, 0.0
+
+        system = platform.system().lower()
+        gpu_name = ""
+
+        # 1. Query NVIDIA GPU Name
+        try:
+            res = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True, check=True, timeout=5
+            )
+            gpu_name = res.stdout.strip().split("\n")[0]
+        except Exception:
+            pass
+
+        # 2. Query AMD on Linux
+        if not gpu_name and system == "linux":
+            try:
+                res = subprocess.run(
+                    ["rocm-smi", "--showproductname"],
+                    capture_output=True, text=True, timeout=5
+                )
+                for line in res.stdout.splitlines():
+                    if "Card series" in line or "Product Name" in line:
+                        gpu_name = line.split(":")[1].strip()
+                        break
+            except Exception:
+                pass
+
+        # 3. macOS (Apple Silicon) Model Name
+        if not gpu_name and system == "darwin":
+            try:
+                res = subprocess.run(
+                    ["sysctl", "machdep.cpu.brand_string"],
+                    capture_output=True, text=True, timeout=5
+                )
+                gpu_name = res.stdout.strip().split(":")[1].strip()
+            except Exception:
+                pass
+
+        # Parse bandwidth from name
+        bandwidth = None
+        if gpu_name:
+            bandwidth = self._get_gpu_bandwidth_from_name(gpu_name)
+            if bandwidth:
+                print(f"{_PFX} Detected GPU Name: '{gpu_name}' -> Bandwidth: {bandwidth} GB/s")
+            else:
+                print(f"{_PFX} Detected GPU Name: '{gpu_name}' (No mapped bandwidth)")
+
+        # Fallback heuristic based on VRAM size
+        if bandwidth is None:
+            vram_gb = total_vram / (1024**3)
+            if vram_gb >= 24:
+                bandwidth = 1000.0
+            elif vram_gb >= 16:
+                bandwidth = 500.0
+            elif vram_gb >= 8:
+                bandwidth = 300.0
+            else:
+                bandwidth = 150.0
+            print(f"{_PFX} Fallback GPU Bandwidth heuristic: {bandwidth} GB/s (based on {vram_gb:.1f} GB VRAM)")
+
+        return total_vram, bandwidth
+
+    def _calculate_model_suitability(self, info: dict, context_len: int, gpu_vram_bytes: int, gpu_bandwidth_gb_s: float) -> dict:
+        """
+        Mathematically calculate if a model fits in VRAM and estimate its TPS.
+        Based on GGUF metadata returned from central server / Ollama show endpoint.
+        """
+        model_info = info.get("model_info", {})
+        if not model_info and "model_info" in info:
+            model_info = info["model_info"].get("model_info", {})
+
+        # 1. Parameter count
+        param_count = model_info.get("general.parameter_count")
+        if not param_count:
+            param_count = next((v for k, v in model_info.items() if k.endswith("parameter_count")), None)
+        if not param_count:
+            size_bytes = float(info.get("size", 0))
+            if size_bytes > 0:
+                param_count = int(size_bytes * 1.5)
+            else:
+                param_count = 8000000000  # Default 8B
+
+        # 2. Extract block/layer count
+        block_count = model_info.get("llama.block_count") or model_info.get("general.block_count")
+        if not block_count:
+            block_count = next((v for k, v in model_info.items() if k.endswith(".block_count")), 32)
+        
+        # 3. Extract attention heads & dimension
+        head_count = model_info.get("llama.attention.head_count")
+        if not head_count:
+            head_count = next((v for k, v in model_info.items() if k.endswith(".head_count")), 32)
+        
+        head_count_kv = model_info.get("llama.attention.head_count_kv")
+        if not head_count_kv:
+            head_count_kv = next((v for k, v in model_info.items() if k.endswith(".head_count_kv")), head_count)
+
+        head_dim = model_info.get("llama.attention.key_length")
+        if not head_dim:
+            head_dim = next((v for k, v in model_info.items() if k.endswith(".key_length")), 128)
+
+        # 4. Weights Size Calculation
+        details = info.get("details", {})
+        quant_type = str(details.get("quantization_level", details.get("parameter_size", "Q4_K_M"))).upper()
+        
+        bpe = self._GGUF_TYPE_BYTES.get(quant_type, 0.5)
+        weight_bytes = param_count * bpe
+
+        # 5. KV Cache Size Calculation (FP16 elements, 2 bytes each)
+        # Formula: 2 (K and V) * num_layers * num_kv_heads * head_dim * context_len * 2 bytes
+        kv_cache_bytes = 4 * int(block_count) * int(head_count_kv) * int(head_dim) * context_len
+
+        # 6. Total VRAM footprint (Weights + KV Cache + 10% system overhead)
+        total_required_bytes = int((weight_bytes + kv_cache_bytes) * 1.10)
+
+        # 7. Check if fits in GPU VRAM
+        fits_in_vram = total_required_bytes <= gpu_vram_bytes
+
+        # 8. Estimate TPS using roofline decode phase calculation
+        estimated_tps = 0.0
+        if fits_in_vram and total_required_bytes > 0:
+            gpu_bandwidth_bps = gpu_bandwidth_gb_s * (10**9)
+            estimated_tps = 0.75 * (gpu_bandwidth_bps / total_required_bytes)
+
+        return {
+            "fits": fits_in_vram,
+            "weight_bytes": weight_bytes,
+            "kv_cache_bytes": kv_cache_bytes,
+            "total_vram_bytes": total_required_bytes,
+            "estimated_tps": round(estimated_tps, 2)
+        }
 
     def _load_manifest_names(self):
         """Load the set of managed model names from disk."""
@@ -294,8 +507,7 @@ class ModelManager:
             print(f"{_PFX} user_models updated ({len(self.user_models)} total): {sorted(self.user_models)}")
 
         # 1. Hardware Discovery
-        total_vram = self.get_total_vram()
-        print(f"{_PFX} Detected VRAM: {total_vram / (1024**3):.2f} GB")
+        total_vram, bandwidth = self.get_gpu_specs()
 
         # Guard: without a GPU there is nothing to optimize
         if total_vram == 0:
@@ -306,6 +518,32 @@ class ModelManager:
         demand = await self.get_demand_chart()
         if not demand:
             return ([], "")
+
+        # Load slopemon thresholds (models with significant samples)
+        slope_peer_thresholds = {}
+        if _SLOPEMON_DATA_PATH.exists():
+            try:
+                with open(_SLOPEMON_DATA_PATH, "r") as f:
+                    slopemon_data = json.load(f)
+                for model_name, slopemon_info in slopemon_data.get("models", {}).items():
+                    peak = slopemon_info.get("peak", 0)
+                    if peak > 0:
+                        slope_peer_thresholds[model_name] = peak / 3
+                print(f"{_PFX} Loaded {len(slope_peer_thresholds)} network peak thresholds from slopemon.")
+            except Exception as e:
+                print(f"{_PFX} Error reading slopemon file: {e}")
+
+        # Load min_acceptable_tps from config
+        min_acceptable_tps = 15.0
+        if _CONFIG_PATH.exists():
+            try:
+                config = configparser.ConfigParser()
+                config.read(_CONFIG_PATH)
+                if config.has_section("provider") and config.has_option("provider", "min_acceptable_tps"):
+                    min_acceptable_tps = float(config.get("provider", "min_acceptable_tps"))
+            except Exception as e:
+                print(f"{_PFX} Error reading min_acceptable_tps from config: {e}")
+        print(f"{_PFX} Default min_acceptable_tps: {min_acceptable_tps} TPS")
 
         # 3. Calculate Opportunity & Filter
         candidates = []
@@ -326,21 +564,56 @@ class ModelManager:
             if model in self.manifest:
                 opportunity *= _STICKINESS_FACTOR
             
+            # Fetch remote info
             info = await self.get_remote_model_info(model)
             if not info:
                 continue
 
-            # Estimate VRAM by walking the tensor list
-            estimated_vram = self._estimate_vram_for_model(info)
-            print(f"{_PFX} Estimated VRAM for {model}: {estimated_vram / (1024**3):.2f} GB")
-            if total_vram > 0 and estimated_vram > total_vram:
+            # Check feasibility and speed via custom metadata suitability check
+            try:
+                suitability = self._calculate_model_suitability(
+                    info,
+                    context_len=8192,
+                    gpu_vram_bytes=total_vram,
+                    gpu_bandwidth_gb_s=bandwidth
+                )
+                fits_in_vram = suitability["fits"]
+                estimated_tps = suitability["estimated_tps"]
+                estimated_vram = suitability["total_vram_bytes"]
+                
+                # If calculations result in 0 or extremely low VRAM, fall back
+                if estimated_vram < 100 * 1024 * 1024:
+                    raise ValueError("Estimated VRAM is too low, metadata might be missing.")
+                
+                print(f"{_PFX} Suitability check for {model}: fits={fits_in_vram}, tps={estimated_tps:.1f} (target threshold: {slope_peer_thresholds.get(model, min_acceptable_tps):.1f} TPS, VRAM={estimated_vram / (1024**3):.2f} GB)")
+            except Exception as e:
+                # Fallback to existing logic if calculator fails or metadata is missing
+                estimated_vram = self._estimate_vram_for_model(info)
+                fits_in_vram = (total_vram > 0 and estimated_vram <= total_vram)
+                # Compute a rough TPS fallback
+                if fits_in_vram and estimated_vram > 0:
+                    gpu_bandwidth_bps = bandwidth * (10**9)
+                    estimated_tps = 0.75 * (gpu_bandwidth_bps / estimated_vram)
+                else:
+                    estimated_tps = 0.0
+                print(f"{_PFX} [Fallback] Calculated suitability failed ({e}). Estimated VRAM for {model}: {estimated_vram / (1024**3):.2f} GB, fits={fits_in_vram}, tps={estimated_tps:.1f}")
+
+            # Filter candidates based on VRAM fit and performance threshold
+            target_threshold = slope_peer_thresholds.get(model, min_acceptable_tps)
+            
+            if not fits_in_vram:
+                print(f"{_PFX} Skipping {model}: does not fit in VRAM.")
+                continue
+            
+            if estimated_tps < target_threshold:
+                print(f"{_PFX} Skipping {model}: estimated tps ({estimated_tps:.1f}) < target threshold ({target_threshold:.1f} TPS).")
                 continue
 
             candidates.append({
                 "model": model,
                 "opportunity": opportunity,
                 "size_bytes": estimated_vram,  # reuse field for VRAM estimate
-                "info": info
+                "info": info or {}
             })
 
         candidates.sort(key=lambda x: x["opportunity"], reverse=True)

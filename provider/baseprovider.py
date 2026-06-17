@@ -368,7 +368,7 @@ class ProviderGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Provider v30")
+        self.info_label = QLabel("Provider v31")
         self.info_label.setStyleSheet("color: #666666; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -588,6 +588,7 @@ class ProviderGUI(QMainWindow):
                 print("[STARTUP] Fetching global performance data...")
                 perf_data = {"data": []}
                 try:
+                    import httpx as _httpx_sync
                     with _httpx_sync.Client(timeout=15.0) as client:
                         resp = client.get("https://www.thinkfarm.net/api/performance")
                         resp.raise_for_status()
