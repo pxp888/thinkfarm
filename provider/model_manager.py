@@ -231,12 +231,25 @@ class ModelManager:
         if not model_info and "model_info" in info:
             model_info = info["model_info"].get("model_info", {})
 
+        def safe_int(val, default):
+            try:
+                if val is None:
+                    return default
+                return int(val)
+            except (ValueError, TypeError):
+                return default
+
         # 1. Parameter count
         param_count = model_info.get("general.parameter_count")
         if not param_count:
-            param_count = next((v for k, v in model_info.items() if k.endswith("parameter_count")), None)
-        if not param_count:
-            size_bytes = float(info.get("size", 0))
+            param_count = next((v for k, v in model_info.items() if k.endswith("parameter_count") and v is not None), None)
+        
+        param_count = safe_int(param_count, 0)
+        if param_count <= 0:
+            try:
+                size_bytes = float(info.get("size", 0))
+            except (ValueError, TypeError):
+                size_bytes = 0.0
             if size_bytes > 0:
                 param_count = int(size_bytes * 1.5)
             else:
@@ -245,20 +258,24 @@ class ModelManager:
         # 2. Extract block/layer count
         block_count = model_info.get("llama.block_count") or model_info.get("general.block_count")
         if not block_count:
-            block_count = next((v for k, v in model_info.items() if k.endswith(".block_count")), 32)
+            block_count = next((v for k, v in model_info.items() if k.endswith(".block_count") and v is not None), 32)
+        block_count = safe_int(block_count, 32)
         
         # 3. Extract attention heads & dimension
         head_count = model_info.get("llama.attention.head_count")
         if not head_count:
-            head_count = next((v for k, v in model_info.items() if k.endswith(".head_count")), 32)
+            head_count = next((v for k, v in model_info.items() if k.endswith(".head_count") and v is not None), 32)
+        head_count = safe_int(head_count, 32)
         
         head_count_kv = model_info.get("llama.attention.head_count_kv")
         if not head_count_kv:
-            head_count_kv = next((v for k, v in model_info.items() if k.endswith(".head_count_kv")), head_count)
+            head_count_kv = next((v for k, v in model_info.items() if k.endswith(".head_count_kv") and v is not None), head_count)
+        head_count_kv = safe_int(head_count_kv, head_count)
 
         head_dim = model_info.get("llama.attention.key_length")
         if not head_dim:
-            head_dim = next((v for k, v in model_info.items() if k.endswith(".key_length")), 128)
+            head_dim = next((v for k, v in model_info.items() if k.endswith(".key_length") and v is not None), 128)
+        head_dim = safe_int(head_dim, 128)
 
         # 4. Weights Size Calculation
         details = info.get("details", {})
@@ -269,7 +286,7 @@ class ModelManager:
 
         # 5. KV Cache Size Calculation (FP16 elements, 2 bytes each)
         # Formula: 2 (K and V) * num_layers * num_kv_heads * head_dim * context_len * 2 bytes
-        kv_cache_bytes = 4 * int(block_count) * int(head_count_kv) * int(head_dim) * context_len
+        kv_cache_bytes = 4 * block_count * head_count_kv * head_dim * context_len
 
         # 6. Total VRAM footprint (Weights + KV Cache + 10% system overhead)
         total_required_bytes = int((weight_bytes + kv_cache_bytes) * 1.10)
