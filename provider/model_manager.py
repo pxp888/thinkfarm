@@ -120,6 +120,12 @@ class ModelManager:
             "t4": 320.0,
             "v100": 900.0,
             "p100": 732.0,
+            "l40s": 864.0,
+            "l40": 864.0,
+            "l4": 300.0,
+            "6000 ada": 960.0,
+            "a6000": 768.0,
+            "rtx 6000": 768.0,
 
             # AMD ROCm / Radeon
             "mi300": 5300.0,
@@ -284,6 +290,24 @@ class ModelManager:
         bpe = self._GGUF_TYPE_BYTES.get(quant_type, 0.5)
         weight_bytes = param_count * bpe
 
+        # 4.5. MoE Check: Identify active weight size for TPS estimation
+        expert_count = model_info.get("llama.expert_count") or model_info.get("general.expert_count")
+        if not expert_count:
+            expert_count = next((v for k, v in model_info.items() if "expert_count" in k and v is not None), None)
+        expert_count = safe_int(expert_count, 0)
+
+        expert_used_count = model_info.get("llama.expert_used_count") or model_info.get("general.expert_used_count")
+        if not expert_used_count:
+            expert_used_count = next((v for k, v in model_info.items() if "expert_used_count" in k and v is not None), None)
+        expert_used_count = safe_int(expert_used_count, 0)
+
+        active_weight_bytes = weight_bytes
+        if expert_count > 0 and expert_used_count > 0:
+            # For MoE models, only a subset of experts are activated per token.
+            # Estimate active weight bytes: assume non-expert layers (attention, embedding, norm, etc.)
+            # are ~15% of the total model size, and expert layers are ~85%.
+            active_weight_bytes = weight_bytes * (0.15 + 0.85 * (expert_used_count / expert_count))
+
         # 5. KV Cache Size Calculation (FP16 elements, 2 bytes each)
         # Formula: 2 (K and V) * num_layers * num_kv_heads * head_dim * context_len * 2 bytes
         kv_cache_bytes = 4 * block_count * head_count_kv * head_dim * context_len
@@ -298,7 +322,9 @@ class ModelManager:
         estimated_tps = 0.0
         if fits_in_vram and total_required_bytes > 0:
             gpu_bandwidth_bps = gpu_bandwidth_gb_s * (10**9)
-            estimated_tps = 0.75 * (gpu_bandwidth_bps / total_required_bytes)
+            # Use active weight bytes instead of total weight bytes for decode phase bandwidth calculation
+            active_required_bytes = int((active_weight_bytes + kv_cache_bytes) * 1.10)
+            estimated_tps = 0.75 * (gpu_bandwidth_bps / active_required_bytes)
 
         return {
             "fits": fits_in_vram,
@@ -586,6 +612,13 @@ class ModelManager:
             if not info:
                 continue
 
+            # Apply macOS specific model filtering
+            if platform.system().lower() == "darwin":
+                mac_patterns = ["mlx", "mlxc", "apple-silicon", "metal", "coreml", "ane", "mps"]
+                if not any(pat in model.lower() for pat in mac_patterns):
+                    print(f"{_PFX} Skipping {model}: not a Mac-specific model format.")
+                    continue
+
             # Check feasibility and speed via custom metadata suitability check
             try:
                 suitability = self._calculate_model_suitability(
@@ -615,15 +648,9 @@ class ModelManager:
                     estimated_tps = 0.0
                 print(f"{_PFX} [Fallback] Calculated suitability failed ({e}). Estimated VRAM for {model}: {estimated_vram / (1024**3):.2f} GB, fits={fits_in_vram}, tps={estimated_tps:.1f}")
 
-            # Filter candidates based on VRAM fit and performance threshold
-            target_threshold = slope_peer_thresholds.get(model, min_acceptable_tps)
-            
+            # Filter candidates based on VRAM fit
             if not fits_in_vram:
                 print(f"{_PFX} Skipping {model}: does not fit in VRAM.")
-                continue
-            
-            if estimated_tps < target_threshold:
-                print(f"{_PFX} Skipping {model}: estimated tps ({estimated_tps:.1f}) < target threshold ({target_threshold:.1f} TPS).")
                 continue
 
             candidates.append({
