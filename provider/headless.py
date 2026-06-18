@@ -1,7 +1,7 @@
 """
 thinkfarm Provider Launcher (headless)
 
-CLI front-end that starts/stops the provider via solo.py (no GUI).
+CLI front-end that starts/stops the provider via zombie.py (no GUI).
 Configuration loaded from ~/.thinkfarm/config.ini.
 """
 
@@ -77,7 +77,7 @@ _PERF_MIN_SAMPLES = 30      # need > 30 samples before trusting the peak
 
 
 def _write_priority_model(model: str) -> None:
-    """Write the priority model to a file for solo.py to consume."""
+    """Write the priority model to a file for zombie.py to consume."""
     if not model:
         return
     config_dir = os.path.dirname(_CONFIG_PATH)
@@ -308,25 +308,25 @@ def _restart_ollama(cmd_raw, url):
 
 
 def _start_service_sync():
-    """Start solo.py subprocess. Called from management loop."""
+    """Start zombie.py subprocess. Called from management loop."""
     global _server_process
     if _server_process is not None:
         print("[STARTUP] Service is already running.")
         return
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    script_path = os.path.join(script_dir, "solo.py")
+    script_path = os.path.join(script_dir, "zombie.py")
     project_root = os.path.dirname(script_dir)
 
     _server_process = subprocess.Popen(
         [sys.executable, "-u", script_path],
         cwd=project_root,
     )
-    print(f"[STARTUP] solo.py started (PID { _server_process.pid })")
+    print(f"[STARTUP] zombie.py started (PID { _server_process.pid })")
 
 
 def _stop_service_sync():
-    """Stop solo.py subprocess. Called from management loop."""
+    """Stop zombie.py subprocess. Called from management loop."""
     global _server_process
     if _server_process is None:
         return
@@ -456,9 +456,9 @@ def cmd_start():
     _ollama = OllamaClient()
     _model_manager = ModelManager(_ollama, os.environ.get("SERVER_URL", "https://app.thinkfarm.net"))
 
-    # 4. Start solo.py
+    # 4. Start zombie.py
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    script_path = os.path.join(script_dir, "solo.py")
+    script_path = os.path.join(script_dir, "zombie.py")
     project_root = os.path.dirname(script_dir)
 
     _stop_event.clear()
@@ -467,7 +467,7 @@ def cmd_start():
         cwd=project_root,
     )
     _write_pid()
-    print(f"[STARTUP] solo.py started (PID {_server_process.pid})")
+    print(f"[STARTUP] zombie.py started (PID {_server_process.pid})")
 
     # 5. Start managed model loop in background
     config_dir = os.path.expanduser("~/.thinkfarm")
@@ -489,7 +489,7 @@ def cmd_start():
                 rc = _server_process.poll()
                 if rc is not None:
                     if not _stop_event.is_set():
-                        print(f"\nsolo.py exited with code {rc}")
+                        print(f"\nzombie.py exited with code {rc}")
                         if rc == 42:
                             trigger_data = _check_slopotrigger()
                             if trigger_data:
@@ -501,7 +501,7 @@ def cmd_start():
                                 
                                 if action == "restart_ollama":
                                     if _restart_ollama(config.get("ollama_restart_cmd", ""), config["ollama_url"]):
-                                        print("[SLOPE-MON] Recovery successful. Restarting solo...")
+                                        print("[SLOPE-MON] Recovery successful. Restarting zombie...")
                                         _server_process = None
                                         _start_service_sync()
                                         continue
@@ -510,7 +510,7 @@ def cmd_start():
                                         break
                                 else:
                                     add_to_blacklist(model)
-                                    print(f"[SLOPE-MON] Model {model} blacklisted. Restarting solo...")
+                                    print(f"[SLOPE-MON] Model {model} blacklisted. Restarting zombie...")
                                     _server_process = None
                                     _start_service_sync()
                                     continue
