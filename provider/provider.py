@@ -495,7 +495,7 @@ class ProviderGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Provider v33")
+        self.info_label = QLabel("Provider v34")
         self.info_label.setStyleSheet("color: #8e8e93; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -812,8 +812,13 @@ class ProviderGUI(QMainWindow):
                                 self.signals.ui_state_signal.emit("stopped_error")
                                 if self._server_process:
                                     self._server_process.terminate()
+                                    try:
+                                        self._server_process.wait(timeout=5)
+                                    except subprocess.TimeoutExpired:
+                                        self._server_process.kill()
+                                        self._server_process.wait()
                                     self._server_process = None
-                                break
+                                return
                             else:
                                 print(f"[MGMT] Zero eval detected. Restarting Ollama (attempt {zero_eval_restarts}/3).")
                                 self.restart_ollama_server()

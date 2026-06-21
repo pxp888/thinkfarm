@@ -368,7 +368,7 @@ class ProviderGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Provider v33")
+        self.info_label = QLabel("Provider v34")
         self.info_label.setStyleSheet("color: #666666; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -714,8 +714,13 @@ class ProviderGUI(QMainWindow):
                             self.signals.ui_state_signal.emit("stopped_error")
                             if self._server_process:
                                 self._server_process.terminate()
+                                try:
+                                    self._server_process.wait(timeout=5)
+                                except subprocess.TimeoutExpired:
+                                    self._server_process.kill()
+                                    self._server_process.wait()
                                 self._server_process = None
-                            break
+                            return
                     except Exception as e:
                         print(f"[MGMT] Error checking zero eval file: {e}")
                     time.sleep(1)
