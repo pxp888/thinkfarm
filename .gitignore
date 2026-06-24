@@ -79,3 +79,20 @@ task-definition.json
 
 *.spec
 sync.sh
+
+# Unity project artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.coverage
+htmlcov/
+uvicorn.log
+gunicorn.pid
+.ipynb_checkpoints
+.mypy_cache/
+.typeshed/
+*.exe
+*_spec.py
+debug/
