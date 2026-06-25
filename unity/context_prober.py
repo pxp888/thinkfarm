@@ -676,7 +676,8 @@ async def create_custom_model(base_url: str, original_model: str, max_ctx: int) 
     The custom model is prefixed with 'thinkfarm-'.
     """
     custom_model_name = f"thinkfarm-{original_model}"
-    print(f"{_PFX} Ensuring custom model {custom_model_name} exists with num_ctx={max_ctx}...")
+    adjusted_ctx = int(max_ctx * 0.9)
+    print(f"{_PFX} Ensuring custom model {custom_model_name} exists with num_ctx={adjusted_ctx} (90% of discovered {max_ctx})...")
     try:
         async with httpx.AsyncClient(base_url=base_url, timeout=60.0) as client:
             resp = await client.post(
@@ -685,7 +686,7 @@ async def create_custom_model(base_url: str, original_model: str, max_ctx: int) 
                     "model": custom_model_name,
                     "from": original_model,
                     "parameters": {
-                        "num_ctx": max_ctx
+                        "num_ctx": adjusted_ctx
                     },
                     "stream": False,
                 }
