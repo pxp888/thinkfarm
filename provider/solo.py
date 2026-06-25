@@ -238,6 +238,8 @@ def _context_fits(model: str, job_body: dict) -> bool:
         print(f"Context check: {model} has limit=0 — declining.")
         return False
 
+    adjusted_limit = int(limit * 0.9) if limit > 0 else limit
+
     requested = (
         job_body.get("options", {}).get("num_ctx")
         if isinstance(job_body.get("options"), dict)
@@ -245,8 +247,8 @@ def _context_fits(model: str, job_body: dict) -> bool:
     )
     if requested is None:
         return True
-    if requested > limit:
-        print(f"Context check: {model} requested {requested:,} > limit {limit:,} — declining.")
+    if requested > adjusted_limit:
+        print(f"Context check: {model} requested {requested:,} > limit {adjusted_limit:,} — declining.")
         return False
     return True
 
@@ -326,12 +328,17 @@ async def get_provider_status():
     status = _filter_by_gpu_limit(status)
     loaded_list = _filter_by_gpu_limit(loaded_list)
 
+    adjusted_limits = {
+        name: (int(lim * 0.9) if lim > 0 else lim)
+        for name, lim in gpu_context_limits.items()
+    }
+
     return {
         "provider_id": PROVIDER_ID,
         "connected_at": datetime.now().isoformat(),
         "models": status,
         "loaded_models": loaded_list,
-        "context_limits": gpu_context_limits,
+        "context_limits": adjusted_limits,
         "is_busy": is_busy > 0,
     }
 
@@ -343,11 +350,16 @@ async def get_loaded_models_only():
 
     loaded_list = _filter_by_gpu_limit(loaded_list)
 
+    adjusted_limits = {
+        name: (int(lim * 0.9) if lim > 0 else lim)
+        for name, lim in gpu_context_limits.items()
+    }
+
     return {
         "provider_id": PROVIDER_ID,
         "connected_at": datetime.now().isoformat(),
         "loaded_models": loaded_list,
-        "context_limits": gpu_context_limits,
+        "context_limits": adjusted_limits,
         "is_busy": is_busy > 0,
     }
 
