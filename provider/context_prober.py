@@ -193,6 +193,107 @@ def save_performance_baselines(data: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _get_nvidia_gpu_vram_mb() -> tuple[int, int]:
+    """Return (total_vram_mb, free_vram_mb) for NVIDIA GPU."""
+    try:
+        import subprocess
+        res = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.total,memory.free", "--format=csv,noheader,nounits"],
+            encoding="utf-8"
+        ).strip().split("\n")
+        
+        # SUM VRAM across visible or all GPUs
+        import os
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if visible:
+            try:
+                indices = [int(x.strip()) for x in visible.split(",") if x.strip().isdigit()]
+                if indices:
+                    total = 0
+                    free = 0
+                    for idx in indices:
+                        if idx < len(res):
+                            parts = res[idx].split(",")
+                            total += int(parts[0].strip())
+                            free += int(parts[1].strip())
+                    return total, free
+            except Exception:
+                pass
+        
+        total = 0
+        free = 0
+        for line in res:
+            parts = line.split(",")
+            if len(parts) >= 2:
+                total += int(parts[0].strip())
+                free += int(parts[1].strip())
+        return total, free
+    except Exception:
+        return -1, -1
+
+
+def _estimate_kv_cache_bytes_per_token(model_info: Dict[str, Any]) -> float:
+    """Estimate KV cache size per token in bytes."""
+    layers = 0
+    for k, v in model_info.items():
+        if k.endswith(".block_count"):
+            layers = int(v)
+            break
+            
+    kv_heads = 0
+    for k, v in model_info.items():
+        if k.endswith(".head_count_kv"):
+            kv_heads = int(v)
+            break
+            
+    heads = 0
+    for k, v in model_info.items():
+        if k.endswith(".head_count"):
+            heads = int(v)
+            break
+            
+    if kv_heads == 0:
+        kv_heads = heads if heads > 0 else 32
+        
+    head_dim = 0
+    for k, v in model_info.items():
+        if k.endswith(".key_length") or k.endswith(".value_length"):
+            head_dim = int(v)
+            break
+            
+    if head_dim == 0:
+        emb_len = 0
+        for k, v in model_info.items():
+            if k.endswith(".embedding_length"):
+                emb_len = int(v)
+                break
+        if emb_len > 0 and heads > 0:
+            head_dim = emb_len // heads
+        else:
+            head_dim = 128
+            
+    if layers == 0:
+        layers = 32
+        
+    # KV cache size per token = 2 (key & value) * layers * kv_heads * head_dim * 2 (bytes per float16)
+    return 2 * layers * kv_heads * head_dim * 2
+
+
+async def _get_model_size_from_tags(base_url: str, model_name: str) -> int:
+    """Fetch the total model size in bytes from /api/tags."""
+    try:
+        async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
+            resp = await client.get("/api/tags")
+            resp.raise_for_status()
+            data = resp.json()
+            for m in data.get("models", []):
+                if m.get("name") == model_name:
+                    return int(m.get("size", 0))
+    except Exception:
+        pass
+    return 0
+
+
 async def _get_model_info(base_url: str, model_name: str) -> tuple[int, bool, bool]:
     """
     Query /api/show and return (max_ctx, is_embed, is_eligible).
@@ -257,6 +358,28 @@ async def _get_model_info(base_url: str, model_name: str) -> tuple[int, bool, bo
                     except:
                         pass
         ctx = int(ctx)
+
+        # Estimate KV cache size per token and cap ctx analytically based on VRAM
+        try:
+            kv_bytes_per_token = _estimate_kv_cache_bytes_per_token(model_info)
+            if kv_bytes_per_token > 0:
+                model_size_bytes = await _get_model_size_from_tags(base_url, model_name)
+                if model_size_bytes > 0:
+                    total_vram_mb, _ = _get_nvidia_gpu_vram_mb()
+                    if total_vram_mb > 0:
+                        total_vram_bytes = total_vram_mb * 1024 * 1024
+                        # Reserve 1.5 GB for system/UI overhead
+                        overhead_bytes = 1536 * 1024 * 1024
+                        available_kv_bytes = total_vram_bytes - model_size_bytes - overhead_bytes
+                        if available_kv_bytes > 0:
+                            analytical_max = int(available_kv_bytes / kv_bytes_per_token)
+                            print(f"{_PFX}   Analytical KV-based max context: {analytical_max:,} tokens (KV size/token = {kv_bytes_per_token} bytes, model weights = {model_size_bytes / (1024*1024):,.1f} MB, VRAM = {total_vram_mb:,} MB)")
+                            ctx = min(int(ctx), analytical_max)
+                        else:
+                            print(f"{_PFX}   WARNING: Model size ({model_size_bytes / (1024*1024):,.1f} MB) + overhead exceeds VRAM ({total_vram_mb:,} MB). Capping context to {_MIN_CTX} tokens.")
+                            ctx = _MIN_CTX
+        except Exception as e:
+            print(f"{_PFX}   WARNING: Could not calculate analytical KV limit: {e}")
 
         model_type = "embedding" if is_embed else "generative"
         print(f"{_PFX}   /api/show -> type={model_type}, max_ctx={ctx:,}")
