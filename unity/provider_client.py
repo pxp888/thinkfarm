@@ -217,9 +217,14 @@ class ProviderClient:
             for m in models:
                 name = m.get("name")
                 if name:
-                    # Use cached limit if available and positive, else fallback to 8192
+                    # Use 90% of cached limit if available and positive, else fallback to 8192
                     limit = limits.get(name)
-                    context_limits[name] = limit if (limit is not None and limit > 0) else 8192
+                    if limit is not None and limit > 0:
+                        context_limits[name] = int(limit * 0.9)
+                    elif limit == -1:
+                        context_limits[name] = -1
+                    else:
+                        context_limits[name] = 8192
             
             status_msg = {
                 "type": "status",
@@ -430,7 +435,12 @@ class ProviderClient:
                 num_ctx = msg.get("num_ctx")
                 if num_ctx is not None and num_ctx > 0:
                     limit = self.context_limits.get(model)
-                    effective_limit = limit if limit is not None else 8192
+                    if limit is not None and limit > 0:
+                        effective_limit = int(limit * 0.9)
+                    elif limit == -1:
+                        effective_limit = -1
+                    else:
+                        effective_limit = 8192
                     if effective_limit != -1:  # -1 is unlimited
                         if num_ctx > effective_limit:
                             self.log(f"Ignoring job {job_id} for model {model}: requested num_ctx {num_ctx} exceeds limit {effective_limit}")
