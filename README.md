@@ -10,7 +10,7 @@ Think Farm consists of two roles:
 
 | Role         | What it does                                                                                                                                                                      |
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Provider** | Exposes your local Ollama models to the Think Farm network, with smart VRAM-aware model management and context probing.                                                           |
+| **Provider** | Registers a node on the Think Farm network, allowing it to serve its local Ollama models to consumers. Optionally auto-manages which models are pulled and loaded based on available storage.                                                           |
 | **Consumer** | Listens to the network for available models and presents them as a local server (`localhost:11435`) with OpenAI-compatible endpoints (`/chat`, `/generate`, `/embeddings`, etc.). |
 
 ## Architecture
@@ -56,7 +56,7 @@ flowchart TB
 
 ### Provider
 
-The Provider GUI shows your local Ollama models and their VRAM requirements, with the option to preload, load, or use as embedding models:
+The Provider GUI lets you set your node's identity, optionally configure model storage preferences, and toggle automatic model management:
 
 ![Provider GUI](assets/provider.webp "Think Farm Provider")
 
@@ -147,11 +147,7 @@ Restart=on-failure
 | `managed_storage_gb` | Maximum disk storage for models (default: 30) |
 | `auto_manage` | Whether to automatically pull/unload models (true/false) |
 
-All three modes share these common features:
-
-- **Model lifecycle** — automatically pulls, loads, and unloads models based on demand and VRAM constraints.
-- **Context probing** — introspects each model's context window and prefill limits via Ollama.
-- **VRAM optimization** — maintains a model portfolio that fits within available GPU memory.
+When auto_manage is enabled, the provider also introspects each model's context window and manages storage within your configured limit.
 
 ### Consumer Setup
 

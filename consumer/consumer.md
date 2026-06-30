@@ -1,106 +1,135 @@
-# thinkfarm Consumer — Architectural Workflow
+# thinkfarm Consumer (qclient.py) — Architecture Overview
 
-This document describes the operational logic of the thinkfarm Consumer (`consumer/main.py`), which acts as a local proxy that presents a distributed cluster as a standard local Ollama instance.
+`qclient.py` is a **PyQt6 GUI** that wraps the `main.py` FastAPI app into a desktop application. It gives users control over their local consumer server — a proxy layer that sits between *providers* and a local Ollama instance, enforcing a model whitelist so only approved models are forwarded.
 
-## 1. Startup & Initialization
+---
 
-The consumer identifies itself using a unique Consumer ID (CID) and connects to the central server.
+## Pseudocode
 
-```mermaid
-sequenceDiagram
-    participant C as Consumer App
-    participant F as Filesystem (.env / config.ini)
-    participant S as Central Server
+```
+1. ON STARTUP:
+   a. Load SERVER_URL from .env (Ollama server address)
+   b. Load consumer_id and port from ~/.thinkfarm/config.ini [consumer] section
+       - If no config exists, defaults: empty ID, port 11434
+   c. Setup UI widgets, tray icon, signal connection
+   d. On delayed tick (100ms): fetch available models from Ollama via /api/tags
 
-    C->>F: load_config() (SERVER_URL)
-    C->>F: Read [consumer] -> consumer_id
-    
-    alt CID Found
-        C->>C: Store in app.state.consumer_id
-    else CID Missing
-        C->>C: app.state.consumer_id = None
-        Note over C: Inference will fail (500)
-    end
+2. MODEL WHITELIST MANAGEMENT:
+   
+   FETCH MODELS:
+      Thread runs: requests.get(f"{SERVER_URL}/api/tags") -> parse model list
+      Emit models_loaded signal with parsed list
+   
+   POPULATE UI:
+      For each model name from Ollama:
+          if matches current filter text (case-insensitive):
+              create QCheckBox(name)
+              store in self.model_vars[name]
+   
+   LOAD WHITELIST FROM DISK (~/.thinkfarm/config.ini [consumer]):
+      whitelist_enabled -> cb.checked
+      whitelist_models  (comma-separated string) -> mark matching checkboxes
+   
+   SELECT ALL / NONE:
+      Iterate model_vars, set each checkbox to True/False
+   
+   FILTER CHANGED:
+      Trigger refresh_models() -> re-fetches from Ollama
+   
+   SAVE WHITELIST TO DISK:
+      enabled = self.whitelist_enabled_cb.isChecked()
+      selected = [name for name, cb in model_vars.items() if cb.checked]
+      Write to config.ini under [consumer]:
+          whitelist_enabled = true/false
+          whitelist_models = "model1,model2,..."
+
+3. START SERVICE:
+   a. Load port from config (default 11434)
+   b. Create uvicorn.config with:
+        app=fastapi_app (from main.py)
+        host="0.0.0.0", port=<configured>, log_level="info"
+   c. Start uvicorn.Server in a daemon thread
+   d. Poll local port every 100ms via socket connect check:
+      - Try 127.0.0.1, ::1, 0.0.0.0 on the port (timeout 10ms each)
+      - If any succeeds -> UI switches to "SYSTEM RUNNING" (green dot)
+      - Timeout at 300 polls (30s) -> silent failure
+
+4. STOP SERVICE:
+   a. Set server.should_exit = True
+   b. Join server_thread with 2s timeout
+   c. Set server = None
+   d. UI switches to "SYSTEM STOPPED" (gray dot)
+
+5. CONSUMER ID MANAGEMENT:
+   SAVE:
+      Validate non-empty string, write to config.ini [consumer] consumer_id
+   
+   LOAD:
+      Read from config.ini [consumer] consumer_id, display in status label
+
+6. SERVER PORT MANAGEMENT:
+   SAVE:
+      Validate integer 1-65535, write to config.ini [consumer] port
+   
+   LOAD:
+      Read from config.ini [consumer] port, populate entry field
+
+7. SYSTEM TRAY:
+   a. Icon loaded from "thinkfarm.webp" in same dir (fallback to standard icon)
+   b. Menu: "Restore" -> show window; "Exit" -> close + stop_service
+   c. Double-click tray icon -> restore_window()
+   d. When minimized -> auto-hide to tray
+
+8. UI STATE MACHINE:
+   "stopped"  (gray dot, red text)
+      -> Start Client clicked -> polling port...
+      -> port responds -> "running" (green dot)
+   
+   "running"  (green dot, green text)
+      -> Stop Client clicked -> set should_exit -> joined -> back to "stopped"
+
+9. CLOSE EVENT:
+   If server running -> stop_service() before window closes
 ```
 
 ---
 
-## 2. Metadata Passthrough (Tags & Versions)
+## What qclient.py Does NOT Do Directly
 
-The consumer mirrors the local Ollama API by fetching metadata from the central server.
+The actual HTTP proxy logic lives in **`main.py`** (FastAPI app started by uvicorn). `qclient.py` does not handle any of the request/response routing itself — it only:
 
-```mermaid
-sequenceDiagram
-    participant U as User (UI / CLI)
-    participant C as Consumer
-    participant S as Central Server
+- Launches/tears down the uvicorn server
+- Provides the config UI (consumer ID, port, model whitelist)
+- Displays running/stopped status
+- Manages system tray presence
 
-    U->>C: GET /api/tags (or /api/version, /api/ps)
-    C->>S: GET /api/tags
-    
-    alt Server Up
-        S-->>C: JSON Model List
-        C-->>U: JSON Model List
-    else Server Down / Error
-        C-->>U: Safe Default (e.g., empty list, v0.18.0)
-    end
+The proxy in `main.py` uses the whitelist to decide whether to forward or block incoming provider requests for a given model name, acting as a gate between providers and the local Ollama instance.
+
+---
+
+## Key Architectural Points
+
+```
+┌──────────────────────────────────────────────┐   uvicorn (port 11434)    ┌─────────────────┐
+│             qclient.py (GUI)                  │<------------------------>│  main.py (FastAPI)│
+│                                              │                           │  (proxy app)     │
+│  • Start/Stop uvicorn server                 │<------------------------>│                  │
+│  • Model whitelist UI (checkboxes)            │   filtered requests       │  whitelist gate  │
+│  • Consumer ID config                          │                            │  logic           │
+│  • Port config                                 │                           └────────┬─────────┘
+│  • System tray support                         │                                    │
+│  • Config persistence to config.ini            │                       forward / block   │
+│                                              │                                    ▼
+└──────────────────────────────────────────────┘                          ┌─────────────────┐
+                                                                         │  Ollama server |
+                                                                         │  (local/remote) │
+                                                                         └─────────────────┘
 ```
 
----
-
-## 3. Distributed Inference Proxy
-
-The core responsibility of the consumer is to forward inference requests while injecting the `X-Consumer-ID` header for server-side routing and logging.
-
-```mermaid
-sequenceDiagram
-    participant U as User (Open WebUI / ollama run)
-    participant C as Consumer
-    participant S as Central Server
-
-    U->>C: POST /api/chat {model, prompt, stream: true}
-    
-    C->>C: Retrieve CID from state
-    C->>C: Capture request body bytes
-    
-    C->>S: POST /api/chat (Stream)
-    Note over C,S: Header: X-Consumer-ID: {CID}
-    
-    alt Server Accepts Job
-        S-->>C: Stream Start (200 OK)
-        loop Data Relay
-            S->>C: NDJSON Chunk
-            C->>U: NDJSON Chunk
-        end
-        S-->>C: Stream End
-    else Server Rejects (Busy/Invalid CID)
-        S-->>C: 503 / 403 Error
-        C-->>U: JSON Error Detail
-    end
-```
-
----
-
-## 4. Key Logic Components
-
-### The `_stream_to_server` Mechanism
-Unlike simple metadata endpoints, inference uses a high-performance streaming relay:
-1.  **Identity Injection**: Every request is tagged with the `X-Consumer-ID` header.
-2.  **Zero-Buffer Streaming**: Chunks are yielded back to the user as soon as they arrive from the central server, ensuring minimal latency.
-3.  **Error Propagation**: If the central server returns an error (e.g., "No providers available"), the consumer parses the error detail and raises a corresponding `HTTPException` back to the user.
-
-### Protocol Compatibility
-The consumer supports multiple API dialects simultaneously:
-- **Ollama Native**: `/api/chat`, `/api/generate`, `/api/show`, etc.
-- **OpenAI Compatible**: `/v1/chat/completions`, `/v1/completions`, and `/v1/models`.
-- **Legacy Embeddings**: Handles both `/api/embeddings` and the newer `/api/embed` formats.
-
----
-
-## 5. Configuration Summary
-
-| Key | Source | Description |
-|---|---|---|
-| `SERVER_URL` | `.env` | The base URL of the thinkfarm central server. |
-| `consumer_id` | `config.ini` | The unique UUID identifying this consumer for usage tracking. |
-| **Local Port** | Default | Listens on port `11434` by default. Override via `config.ini` or the UI. |
+Shared config: `~/.thinkfarm/config.ini` section `[consumer]`:
+| Field             | Value                                  |
+|-------------------|----------------------------------------|
+| consumer_id       | User-set client identifier string      |
+| port              | Local HTTP listening port (default 11434) |
+| whitelist_enabled | `true` or `false`                      |
+| whitelist_models  | Comma-separated model names            |
