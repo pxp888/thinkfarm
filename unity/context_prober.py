@@ -18,6 +18,7 @@ Results are persisted to gpu_context_limits.json next to this file so that
 """
 
 import asyncio
+import configparser
 import json
 import os
 import platform
@@ -35,6 +36,23 @@ _IS_MACOS_UNIFIED = platform.system() == "Darwin" and "arm64" in platform.machin
 
 _CACHE_FILE = os.path.expanduser("~/.thinkfarm/gpu_context_limits.json")
 _BASELINES_FILE = os.path.expanduser("~/.thinkfarm/performance_baselines.json")
+
+# Fraction of discovered GPU limit to use for custom models (0.9 is safe baseline).
+# Read from ~/.thinkfarm/config.ini [provider] context_pressure, default 0.9.
+def _get_context_pressure() -> float:
+    """Load context_pressure from config.ini, defaulting to 0.9."""
+    try:
+        config_dir = os.path.expanduser("~/.thinkfarm")
+        config_path = os.path.join(config_dir, "config.ini")
+        if not os.path.exists(config_path):
+            return 0.9
+        config = configparser.ConfigParser()
+        config.read(config_path)
+        if config.has_section("provider") and config.has_option("provider", "context_pressure"):
+            return float(config.get("provider", "context_pressure"))
+    except Exception:
+        pass
+    return 0.9
 
 # Smallest context size we will probe (powers-of-two friendlier than 1)
 _MIN_CTX = 512
@@ -127,8 +145,92 @@ _MIN_FREE_RAM_MB = 2048  # 2 GB
 # ---------------------------------------------------------------------------
 
 
+_recreated_custom_models = False
+
+
+def _sync_recreate_custom_models(limits: Dict[str, int]) -> None:
+    """Synchronously recreate custom models in Ollama on startup."""
+    try:
+        # Load local_ollama_url and context_pressure
+        config_dir = os.path.expanduser("~/.thinkfarm")
+        config_path = os.path.join(config_dir, "config.ini")
+        local_ollama_url = "http://localhost:11434"
+        context_pressure = 0.9
+        
+        if os.path.exists(config_path):
+            config = configparser.ConfigParser()
+            config.read(config_path)
+            if config.has_section("provider"):
+                if config.has_option("provider", "local_ollama_url"):
+                    val = config.get("provider", "local_ollama_url").strip()
+                    if val:
+                        local_ollama_url = val
+                if config.has_option("provider", "context_pressure"):
+                    try:
+                        context_pressure = float(config.get("provider", "context_pressure"))
+                    except Exception:
+                        pass
+                        
+        print(f"{_PFX} Recreating custom models on startup with context_pressure={context_pressure}...")
+        
+        for model_name, limit in limits.items():
+            if limit <= 0:
+                continue
+                
+            try:
+                # Query /api/show synchronously to check eligibility and type
+                show_url = local_ollama_url.rstrip("/") + "/api/show"
+                resp = httpx.post(show_url, json={"model": model_name}, timeout=10.0)
+                if resp.status_code == 400:
+                    resp = httpx.post(show_url, json={"name": model_name}, timeout=10.0)
+                resp.raise_for_status()
+                info = resp.json()
+                
+                # Eligibility check: skip cloud and custom models.
+                remote_host = info.get("remote_host")
+                remote_model = info.get("remote_model")
+                parent = (info.get("details", {}) or {}).get("parent_model", "")
+                is_eligible = not (remote_host or remote_model)
+                if parent and not (parent.startswith("/") or "sha256" in parent):
+                    is_eligible = False
+                    
+                if not is_eligible:
+                    print(f"{_PFX}  Skipping {model_name} for custom model recreation: not an eligible local model.")
+                    continue
+                    
+                custom_model_name = f"thinkfarm-{model_name}"
+                adjusted_ctx = int(limit * min(context_pressure, 1.0))
+                
+                print(f"{_PFX} Recreating custom model {custom_model_name} with num_ctx={adjusted_ctx}...")
+                create_url = local_ollama_url.rstrip("/") + "/api/create"
+                create_resp = httpx.post(
+                    create_url,
+                    json={
+                        "model": custom_model_name,
+                        "from": model_name,
+                        "parameters": {
+                            "num_ctx": adjusted_ctx
+                        },
+                        "stream": False,
+                    },
+                    timeout=60.0
+                )
+                create_resp.raise_for_status()
+                result = create_resp.json()
+                if result.get("status") == "success":
+                    print(f"{_PFX} Successfully recreated custom model {custom_model_name}.")
+                else:
+                    print(f"{_PFX} Custom model recreation status: {result}")
+            except Exception as e:
+                print(f"{_PFX} WARNING: Failed to recreate custom model for {model_name}: {e}")
+    except Exception as e:
+        print(f"{_PFX} WARNING: Error in _sync_recreate_custom_models: {e}")
+
+
 def load_context_limits() -> Dict[str, int]:
     """Load previously discovered limits from disk. Returns {} on first run."""
+    global _recreated_custom_models
+    
     if not os.path.exists(_CACHE_FILE):
         print(f"{_PFX} No cache file found at {_CACHE_FILE} - starting fresh.")
         return {}
@@ -138,6 +240,11 @@ def load_context_limits() -> Dict[str, int]:
         print(f"{_PFX} Loaded {len(data)} cached context limit(s) from {_CACHE_FILE}.")
         for model, ctx in data.items():
             print(f"{_PFX}   {model}: {ctx:,} tokens (cached)")
+            
+        if not _recreated_custom_models:
+            _recreated_custom_models = True
+            _sync_recreate_custom_models(data)
+            
         return data
     except Exception as e:
         print(f"{_PFX} WARNING: could not read cache file ({e}). Starting fresh.")
@@ -193,6 +300,34 @@ def save_performance_baselines(data: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
+class OllamaConnectionError(RuntimeError):
+    """Raised when the Ollama server is unreachable or crashed during probing."""
+    pass
+
+
+async def _is_server_alive(base_url: str) -> bool:
+    """Check if Ollama server is responsive by calling /api/tags."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            url = base_url.rstrip("/") + "/api/tags"
+            resp = await client.get(url)
+            return resp.status_code == 200
+    except Exception:
+        return False
+
+
+async def _wait_for_server(base_url: str, max_attempts: int = 15) -> bool:
+    """Wait for the Ollama server to become responsive again."""
+    print(f"{_PFX}     Checking if Ollama server at {base_url} is alive...")
+    for attempt in range(1, max_attempts + 1):
+        if await _is_server_alive(base_url):
+            print(f"{_PFX}     Ollama server is responsive.")
+            return True
+        print(f"{_PFX}     Ollama server is unresponsive (attempt {attempt}/{max_attempts}). Waiting 3s...")
+        await asyncio.sleep(3)
+    return False
+
+
 def _get_nvidia_gpu_vram_mb() -> tuple[int, int]:
     """Return (total_vram_mb, free_vram_mb) for NVIDIA GPU."""
     try:
@@ -228,8 +363,18 @@ def _get_nvidia_gpu_vram_mb() -> tuple[int, int]:
                 total += int(parts[0].strip())
                 free += int(parts[1].strip())
         return total, free
-    except Exception:
+    except Exception as e:
+        print(f"{_PFX}   WARNING: Failed to query GPU VRAM via nvidia-smi: {e}")
         return -1, -1
+
+
+def _safe_int(v: Any, default: int = 0) -> int:
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except (ValueError, TypeError):
+        return default
 
 
 def _estimate_kv_cache_bytes_per_token(model_info: Dict[str, Any]) -> float:
@@ -237,19 +382,19 @@ def _estimate_kv_cache_bytes_per_token(model_info: Dict[str, Any]) -> float:
     layers = 0
     for k, v in model_info.items():
         if k.endswith(".block_count"):
-            layers = int(v)
+            layers = _safe_int(v)
             break
             
     kv_heads = 0
     for k, v in model_info.items():
         if k.endswith(".head_count_kv"):
-            kv_heads = int(v)
+            kv_heads = _safe_int(v)
             break
             
     heads = 0
     for k, v in model_info.items():
         if k.endswith(".head_count"):
-            heads = int(v)
+            heads = _safe_int(v)
             break
             
     if kv_heads == 0:
@@ -258,14 +403,14 @@ def _estimate_kv_cache_bytes_per_token(model_info: Dict[str, Any]) -> float:
     head_dim = 0
     for k, v in model_info.items():
         if k.endswith(".key_length") or k.endswith(".value_length"):
-            head_dim = int(v)
+            head_dim = _safe_int(v)
             break
             
     if head_dim == 0:
         emb_len = 0
         for k, v in model_info.items():
             if k.endswith(".embedding_length"):
-                emb_len = int(v)
+                emb_len = _safe_int(v)
                 break
         if emb_len > 0 and heads > 0:
             head_dim = emb_len // heads
@@ -374,10 +519,8 @@ async def _get_model_info(base_url: str, model_name: str) -> tuple[int, bool, bo
                         if available_kv_bytes > 0:
                             analytical_max = int(available_kv_bytes / kv_bytes_per_token)
                             print(f"{_PFX}   Analytical KV-based max context: {analytical_max:,} tokens (KV size/token = {kv_bytes_per_token} bytes, model weights = {model_size_bytes / (1024*1024):,.1f} MB, VRAM = {total_vram_mb:,} MB)")
-                            ctx = min(int(ctx), analytical_max)
                         else:
-                            print(f"{_PFX}   WARNING: Model size ({model_size_bytes / (1024*1024):,.1f} MB) + overhead exceeds VRAM ({total_vram_mb:,} MB). Capping context to {_MIN_CTX} tokens.")
-                            ctx = _MIN_CTX
+                            print(f"{_PFX}   WARNING: Model size ({model_size_bytes / (1024*1024):,.1f} MB) + overhead exceeds VRAM ({total_vram_mb:,} MB).")
         except Exception as e:
             print(f"{_PFX}   WARNING: Could not calculate analytical KV limit: {e}")
 
@@ -408,7 +551,7 @@ async def _probe_performance_baseline(
     for i in range(1, 4):
         print(f"{_PFX}     Pass {i}/3...")
         try:
-            async with httpx.AsyncClient(base_url=base_url, timeout=120.0) as client:
+            async with httpx.AsyncClient(base_url=base_url, timeout=600.0) as client:
                 payload = {
                     "model": model_name,
                     "prompt": "what is the history of Sweden?",
@@ -484,7 +627,7 @@ async def _probe_at_ctx(
         # Embedding models: use /api/embed - /api/generate returns an error.
         print(f"{_PFX}     Sending probe embed (num_ctx={num_ctx:,}) ...", flush=True)
         try:
-            async with httpx.AsyncClient(base_url=base_url, timeout=120.0) as client:
+            async with httpx.AsyncClient(base_url=base_url, timeout=600.0) as client:
                 payload = {
                     "model": model_name,
                     "input": _PROBE_PROMPT,
@@ -498,7 +641,21 @@ async def _probe_at_ctx(
                     f"{_PFX}     Embed OK - {n_embeddings} embedding vector(s) returned"
                 )
         except Exception as e:
-            print(f"{_PFX}     ERROR during probe embed: {e}")
+            err_msg = f"{type(e).__name__}: {e}"
+            if isinstance(e, httpx.HTTPStatusError):
+                try:
+                    body = e.response.text
+                    err_msg += f" | Response body: {body}"
+                except Exception:
+                    pass
+            print(f"{_PFX}     ERROR during probe embed: {err_msg}")
+            
+            # Check if the server is still alive
+            if not await _is_server_alive(base_url):
+                print(f"{_PFX}     WARNING: Ollama server appears to have crashed/stopped during embed probe.")
+                is_alive = await _wait_for_server(base_url)
+                if not is_alive:
+                    raise OllamaConnectionError(f"Ollama server died during embed probing: {err_msg}")
             return False
     else:
         # Generative models: use /api/generate.
@@ -506,7 +663,7 @@ async def _probe_at_ctx(
             f"{_PFX}     Sending probe generate (num_ctx={num_ctx:,}) ...", flush=True
         )
         try:
-            async with httpx.AsyncClient(base_url=base_url, timeout=120.0) as client:
+            async with httpx.AsyncClient(base_url=base_url, timeout=600.0) as client:
                 payload = {
                     "model": model_name,
                     "prompt": _PROBE_PROMPT,
@@ -522,7 +679,21 @@ async def _probe_at_ctx(
                     f"total_duration={gen_data.get('total_duration', '?')}"
                 )
         except Exception as e:
-            print(f"{_PFX}     ERROR during probe generate: {e}")
+            err_msg = f"{type(e).__name__}: {e}"
+            if isinstance(e, httpx.HTTPStatusError):
+                try:
+                    body = e.response.text
+                    err_msg += f" | Response body: {body}"
+                except Exception:
+                    pass
+            print(f"{_PFX}     ERROR during probe generate: {err_msg}")
+            
+            # Check if the server is still alive
+            if not await _is_server_alive(base_url):
+                print(f"{_PFX}     WARNING: Ollama server appears to have crashed/stopped during generate probe.")
+                is_alive = await _wait_for_server(base_url)
+                if not is_alive:
+                    raise OllamaConnectionError(f"Ollama server died during generate probing: {err_msg}")
             return False
 
     # Interpret the result based on platform.
@@ -676,8 +847,8 @@ async def create_custom_model(base_url: str, original_model: str, max_ctx: int) 
     The custom model is prefixed with 'thinkfarm-'.
     """
     custom_model_name = f"thinkfarm-{original_model}"
-    adjusted_ctx = int(max_ctx * 0.9)
-    print(f"{_PFX} Ensuring custom model {custom_model_name} exists with num_ctx={adjusted_ctx} (90% of discovered {max_ctx})...")
+    adjusted_ctx = int(max_ctx * _get_context_pressure())
+    print(f"{_PFX} Ensuring custom model {custom_model_name} exists with num_ctx={adjusted_ctx} (90% of discovered {max_ctx})..." if max_ctx > 0 else f"{_PFX} Ensuring custom model {custom_model_name} exists with full training context...")
     try:
         async with httpx.AsyncClient(base_url=base_url, timeout=60.0) as client:
             resp = await client.post(
@@ -741,6 +912,9 @@ async def _probe_new_models(
     baselines_data = load_performance_baselines()
     baselines = baselines_data.get("baselines", {})
 
+    # Load fresh context_pressure from config at startup to always honour the user's setting.
+    context_pressure = _get_context_pressure()
+
     to_probe = []
     for m in model_names:
         if m not in limits:
@@ -753,75 +927,87 @@ async def _probe_new_models(
             f"{_PFX} All {len(model_names)} model(s) already have cached limits and baselines - "
             f"skipping probe."
         )
-        # Ensure custom models exist for all eligible local models that have a valid limit
-        for model_name in model_names:
-            limit = limits.get(model_name)
-            if limit is not None and limit > 0:
-                await create_custom_model(base_url, model_name, limit)
-        return limits
+    else:
+        try:
+            for idx, model_name in enumerate(to_probe, 1):
+                print(f"{_PFX} [{idx}/{len(to_probe)}] Probing: {model_name}")
+                print(f"{_PFX} " + "-" * 56)
 
-    for idx, model_name in enumerate(to_probe, 1):
-        print(f"{_PFX} [{idx}/{len(to_probe)}] Probing: {model_name}")
-        print(f"{_PFX} " + "-" * 56)
+                # Check server liveness first to fail fast if Ollama is down
+                if not await _is_server_alive(base_url):
+                    raise OllamaConnectionError("Ollama server is unresponsive at the start of probing a model.")
 
-        # Detect model type once - drives probe and unload endpoint choice.
-        # Also captures the declared max ctx to avoid a second /api/show call.
-        upper_bound, is_embed, is_eligible = await _get_model_info(base_url, model_name)
+                # Detect model type once - drives probe and unload endpoint choice.
+                # Also captures the declared max ctx to avoid a second /api/show call.
+                upper_bound, is_embed, is_eligible = await _get_model_info(base_url, model_name)
 
-        if not is_eligible:
-            print(f"{_PFX}  Skipping {model_name}: cloud or custom model is not eligible for sharing.")
-            # Set to 0 in limits so we don't try again next time, but it won't be announced by the client anyway
-            limits[model_name] = 0
-            save_context_limits(limits)
-            continue
+                if not is_eligible:
+                    print(f"{_PFX}  Skipping {model_name}: cloud or custom model is not eligible for sharing.")
+                    # Set to 0 in limits so we don't try again next time, but it won't be announced by the client anyway
+                    limits[model_name] = 0
+                    save_context_limits(limits)
+                    continue
 
-        if is_embed:
-            print(f"{_PFX}  Model type: EMBEDDING - will probe via /api/embed")
-        else:
-            print(f"{_PFX}  Model type: GENERATIVE - will probe via /api/generate")
+                if is_embed:
+                    print(f"{_PFX}  Model type: EMBEDDING - will probe via /api/embed")
+                else:
+                    print(f"{_PFX}  Model type: GENERATIVE - will probe via /api/generate")
 
-        if is_embed:
-            # Embedding models are always "safe" even if they spill to CPU,
-            # as they don't have the same context/OOM risks as generative models.
-            print(f"{_PFX}  RESULT: {model_name} is an embedding model. Storing -1 (N/A).")
-            limits[model_name] = -1
-        else:
-            if model_name in limits and limits[model_name] > 0:
-                best_ctx = limits[model_name]
-                print(f"{_PFX}  Using cached context limit: {best_ctx:,} tokens.")
-            else:
-                best_ctx = await _find_max_gpu_ctx(
-                    base_url, model_name, upper_bound=upper_bound, is_embed=False
-                )
+                if is_embed:
+                    # Embedding models are always "safe" even if they spill to CPU,
+                    # as they don't have the same context/OOM risks as generative models.
+                    print(f"{_PFX}  RESULT: {model_name} is an embedding model. Storing -1 (N/A).")
+                    limits[model_name] = -1
+                else:
+                    if model_name in limits and limits[model_name] > 0:
+                        best_ctx = limits[model_name]
+                        print(f"{_PFX}  Using cached context limit: {best_ctx:,} tokens.")
+                    else:
+                        best_ctx = await _find_max_gpu_ctx(
+                            base_url, model_name, upper_bound=upper_bound, is_embed=False
+                        )
 
-            if best_ctx is None:
-                print(
-                    f"{_PFX}  RESULT: Could not run {model_name} on GPU even at "
-                    f"{_MIN_CTX:,} tokens. Storing 0 (GPU unavailable)."
-                )
-                limits[model_name] = 0
-            else:
-                print(
-                    f"{_PFX}  RESULT: Max GPU-safe context for {model_name} "
-                    f"= {best_ctx:,} tokens [OK]"
-                )
-                limits[model_name] = best_ctx
-                
-                # Establish performance baseline
-                await _probe_performance_baseline(base_url, model_name, best_ctx)
+                    if best_ctx is None:
+                        print(
+                            f"{_PFX}  RESULT: Could not run {model_name} on GPU even at "
+                            f"{_MIN_CTX:,} tokens. Storing 0 (GPU unavailable)."
+                        )
+                        limits[model_name] = 0
+                    else:
+                        print(
+                            f"{_PFX}  RESULT: Max GPU-safe context for {model_name} "
+                            f"= {best_ctx:,} tokens [OK]"
+                        )
+                        limits[model_name] = best_ctx
+                        
+                        # Establish performance baseline
+                        await _probe_performance_baseline(base_url, model_name, best_ctx)
 
-        # Persist after each model in case of crash
-        save_context_limits(limits)
+                # Persist after each model in case of crash
+                save_context_limits(limits)
 
-        # Free VRAM before the next model
-        await _unload_model(base_url, model_name, is_embed=is_embed)
-        print()
+                # Free VRAM before the next model
+                await _unload_model(base_url, model_name, is_embed=is_embed)
+                print()
+        except OllamaConnectionError as e:
+            print(f"{_PFX} ERROR: Probing aborted due to Ollama server connection loss: {e}")
+            return limits
 
-    # Ensure custom models exist for all eligible local models that have a valid limit
+    # Always ensure custom 'thinkfarm-' models exist/are recreated for all eligible local models,
+    # not just those that went through probing. Uses fresh context_pressure from config.
     for model_name in model_names:
         limit = limits.get(model_name)
-        if limit is not None and limit > 0:
-            await create_custom_model(base_url, model_name, limit)
+        if limit is None or limit <= 0:
+            continue
+        
+        # Get full info to check eligibility and type
+        upper_bound, is_embed, is_eligible = await _get_model_info(base_url, model_name)
+        if not is_eligible:
+            print(f"{_PFX}  Skipping {model_name} for custom model: not an eligible local model.")
+            continue
+        
+        # Recreate the custom model. create_custom_model will apply the context_pressure.
+        await create_custom_model(base_url, model_name, limit)
 
     print(f"{_PFX} ----- ----- ----- ----- ----- ----- ----- ----- ----- -----")
     print(f"{_PFX} Probing complete. Summary:")
@@ -871,75 +1057,3 @@ async def get_ollama_models(base_url: str) -> list:
         return []
 
 
-# ---------------"""""""""---CLI entry point
-# ---------------""""""""""
-
-
-def main(args=None):
-    """Main CLI entry point for standalone context probing."""
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Probe local Ollama models to discover GPU context limits."
-    )
-    parser.add_argument(
-        "--ollama-url",
-        default="http://127.0.0.1:11434",
-        help="Ollama server URL (default: http://127.0.0.1:11434)",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Force re-probing all models, ignoring cached results",
-    )
-    args = parser.parse_args(args)
-
-    url = args.ollama_url or "http://127.0.0.1:11434"
-    asyncio.run(_run_cli_probe(url, args.force))
-
-
-async def _run_cli_probe(base_url: str, force: bool = False):
-    """
-    Main probe workflow.
-
-    1. Query /api/tags for all available model names
-    2. Load any previously discovered limits
-    3. Probe models that need probing (or all if --force was given)
-    4. Save results and print summary
-    """
-    limits = load_context_limits()  # Load existing cache
-
-    # If --force, clear all limits and start fresh
-    if force:
-        print(f"{_PFX} --force given - clearing {len(limits)} cached limits.")
-        save_context_limits({})
-        limits = {}
-        save_performance_baselines({"baselines": {}, "performance_alerts": {}})
-
-    # Fetch all models from Ollama
-    print(f"{_PFX} Fetching model list from {base_url}/api/tags...")
-    models = await get_ollama_models(base_url)
-
-    if not models:
-        print(f"{_PFX} No models found on Ollama server.")
-        print(f"{_PFX} Make sure Ollama is running and models are pulled.")
-        return
-
-    print(f"{_PFX} Found {len(models)} model(s): {', '.join(models)}\n")
-
-    # Run probing
-    updated_limits = await _probe_new_models(
-        base_url=base_url,
-        model_names=models,
-        existing_limits=limits,
-    )
-
-    print(f"\n{_PFX} Done!")
-    print(f"{_PFX} Results saved to {_CACHE_FILE}")
-    print(
-        f"{_PFX} -------- ----------- --- -------- ---- ----- -------- ------ ----- --------- ---"
-    )
-
-
-if __name__ == "__main__":
-    main()

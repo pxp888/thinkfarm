@@ -3,6 +3,9 @@ import os
 import threading
 import asyncio
 import logging
+import subprocess
+import socket
+import time
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QCheckBox, QGroupBox,
@@ -84,7 +87,18 @@ class ProviderThread(threading.Thread):
     def run(self):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        self.loop.run_until_complete(self.provider_client.run())
+        try:
+            self.loop.run_until_complete(self.provider_client.run())
+        except RuntimeError as e:
+            if "Event loop stopped before Future completed" in str(e):
+                pass
+            else:
+                raise
+        finally:
+            try:
+                self.loop.close()
+            except Exception:
+                pass
 
     def stop(self):
         if self.loop:
@@ -99,9 +113,131 @@ class ProviderThread(threading.Thread):
 class ThinkfarmApp(QMainWindow):
     models_loaded = pyqtSignal(list)
 
+    def _get_free_port(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('', 0))
+            return s.getsockname()[1]
+
+    def _kill_ollama_process(self):
+        if hasattr(self, '_ollama_process') and self._ollama_process is not None:
+            try:
+                logging.getLogger("thinkfarm").info("Terminating child Ollama process...")
+                if os.name == 'nt':
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self._ollama_process.pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                else:
+                    self._ollama_process.terminate()
+                self._ollama_process.wait(timeout=5)
+            except Exception as e:
+                logging.getLogger("thinkfarm").error(f"Error terminating ollama process: {e}")
+            self._ollama_process = None
+
+    def restart_ollama_server(self):
+        logging.getLogger("thinkfarm").info("Restarting/checking internal ollama server...")
+        
+        self._kill_ollama_process()
+            
+        if hasattr(self, '_ollama_log_file') and self._ollama_log_file is not None:
+            try:
+                self._ollama_log_file.close()
+            except Exception:
+                pass
+            self._ollama_log_file = None
+                
+        models_path = self.config_manager.ollama_models_path.strip()
+
+        port = self._get_free_port()
+        self._ollama_url = f"http://127.0.0.1:{port}"
+        logging.getLogger("thinkfarm").info(f"Starting child Ollama server on port {port}...")
+        
+        env = os.environ.copy()
+        env["OLLAMA_HOST"] = f"127.0.0.1:{port}"
+        env["OLLAMA_DEBUG"] = "1"
+        if models_path:
+            env["OLLAMA_MODELS"] = models_path
+
+        if os.name == 'nt':
+            system_root = env.get("SystemRoot") or env.get("SYSTEMROOT") or "C:\\Windows"
+            env["SystemRoot"] = system_root
+            if "SystemDrive" not in env and "SYSTEMDRIVE" not in env:
+                env["SystemDrive"] = "C:"
+            
+            path_key = next((k for k in env if k.upper() == "PATH"), "PATH")
+            current_path = env.get(path_key, "")
+            paths = current_path.split(os.pathsep) if current_path else []
+            
+            sys32 = os.path.join(system_root, "System32")
+            if sys32 not in paths:
+                paths.append(sys32)
+                
+            user_profile = env.get("USERPROFILE") or os.path.expanduser("~")
+            ollama_default_path = os.path.join(user_profile, "AppData", "Local", "Programs", "Ollama")
+            if ollama_default_path not in paths:
+                paths.append(ollama_default_path)
+                
+            env[path_key] = os.pathsep.join(paths)
+
+        creationflags = 0
+        if os.name == 'nt':
+            creationflags = subprocess.CREATE_NO_WINDOW
+            
+        log_dir = os.path.expanduser("~/.thinkfarm")
+        os.makedirs(log_dir, exist_ok=True)
+        try:
+            self._ollama_log_file = open(os.path.join(log_dir, "ollama_internal.log"), "a", encoding="utf-8")
+            stdout_target = self._ollama_log_file
+            stderr_target = self._ollama_log_file
+        except Exception as e:
+            logging.getLogger("thinkfarm").warning(f"Could not open internal Ollama log file: {e}")
+            stdout_target = subprocess.DEVNULL
+            stderr_target = subprocess.DEVNULL
+
+        try:
+            self._ollama_process = subprocess.Popen(
+                ["ollama", "serve"],
+                env=env,
+                creationflags=creationflags,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_target,
+                stderr=stderr_target
+            )
+            self.config_manager.local_ollama_url = self._ollama_url
+            
+            # Start background thread to await ready state and refresh models
+            def wait_and_refresh():
+                import httpx
+                tags_url = f"{self._ollama_url.rstrip('/')}/api/tags"
+                for _ in range(30):
+                    try:
+                        with httpx.Client(timeout=2.0) as client:
+                            resp = client.get(tags_url)
+                            if resp.status_code == 200:
+                                logging.getLogger("thinkfarm").info("Child Ollama is ready! Refreshing models...")
+                                QTimer.singleShot(0, self.refresh_models)
+                                return
+                    except Exception:
+                        pass
+                    time.sleep(1)
+                logging.getLogger("thinkfarm").warning("Timed out waiting for child Ollama to become ready.")
+
+            threading.Thread(target=wait_and_refresh, daemon=True).start()
+        except Exception as e:
+            logging.getLogger("thinkfarm").error(f"Failed to start child Ollama process: {e}")
+
     def __init__(self):
         super().__init__()
         self.config_manager = ConfigManager()
+        self.config_manager.managed_ollama = (os.name == 'nt')
+        self._original_local_url = self.config_manager.local_ollama_url
+        self._ollama_process = None
+        self._ollama_log_file = None
+
+        if self.config_manager.managed_ollama:
+            self.restart_ollama_server()
+
         self.client_thread = None
         self.provider_thread = None
         
@@ -175,10 +311,20 @@ class ThinkfarmApp(QMainWindow):
     def force_exit(self):
         # Allow actual close on exit action
         self.tray_icon.hide()
+        if self.client_thread and self.client_thread.is_alive():
+            self.client_thread.stop()
+        if self.provider_thread and self.provider_thread.is_alive():
+            self.provider_thread.force_stop()
+        self._kill_ollama_process()
+        if hasattr(self, '_ollama_log_file') and self._ollama_log_file is not None:
+            try:
+                self._ollama_log_file.close()
+            except Exception:
+                pass
         QApplication.quit()
 
     def init_ui(self):
-        self.setWindowTitle("thinkfarm v2")
+        self.setWindowTitle("thinkfarm v4")
         self.resize(1400, 750)
         
         # Stylesheet to match qclient theme
@@ -296,10 +442,6 @@ class ThinkfarmApp(QMainWindow):
         client_form.addRow("Local Port:", self.client_port_input)
         client_form.addRow("", self.whitelist_enabled_cb)
         
-        client_save_btn = QPushButton("Save Configuration")
-        client_save_btn.clicked.connect(self.save_config)
-        client_form.addRow("", client_save_btn)
-        
         client_layout.addLayout(client_form)
 
         # Whitelist Section Header
@@ -389,6 +531,10 @@ class ThinkfarmApp(QMainWindow):
         self.scroll_area.setWidget(self.models_widget)
         client_layout.addWidget(self.scroll_area)
         
+        client_save_btn = QPushButton("Save Configuration")
+        client_save_btn.clicked.connect(self.save_config)
+        client_layout.addWidget(client_save_btn)
+
         self.client_toggle_btn = QPushButton("Start Client Server")
         self.client_toggle_btn.setObjectName("actionButton")
         self.client_toggle_btn.clicked.connect(self.toggle_client)
@@ -409,25 +555,29 @@ class ThinkfarmApp(QMainWindow):
         
         provider_layout.addLayout(status_row2)
         
-        provider_form = QFormLayout()
+        self.provider_form = QFormLayout()
         self.provider_id_input = QLineEdit(self.config_manager.provider_id)
         self.local_ollama_input = QLineEdit(self.config_manager.local_ollama_url)
+        self.models_path_input = QLineEdit(self.config_manager.ollama_models_path)
         self.auto_manage_cb = QCheckBox("Auto Manage Models")
         self.auto_manage_cb.setChecked(self.config_manager.auto_manage_models)
         self.gb_allowed_input = QLineEdit(str(self.config_manager.gb_allowed))
         self.restart_cmd_input = QLineEdit(self.config_manager.ollama_restart_cmd)
         
-        provider_form.addRow("Provider ID:", self.provider_id_input)
-        provider_form.addRow("Local Ollama URL:", self.local_ollama_input)
-        provider_form.addRow("", self.auto_manage_cb)
-        provider_form.addRow("GB Allowed:", self.gb_allowed_input)
-        provider_form.addRow("Ollama Restart Command:", self.restart_cmd_input)
+        self.provider_form.addRow("Provider ID:", self.provider_id_input)
+        self.provider_form.addRow("Local Ollama URL:", self.local_ollama_input)
+        self.provider_form.addRow("Model Storage Path:", self.models_path_input)
+        self.provider_form.addRow("", self.auto_manage_cb)
+        self.provider_form.addRow("GB Allowed:", self.gb_allowed_input)
+        self.provider_form.addRow("Ollama Restart Command:", self.restart_cmd_input)
         
+        self.toggle_managed_ollama_fields()
+
         provider_save_btn = QPushButton("Save Configuration")
         provider_save_btn.clicked.connect(self.save_config)
-        provider_form.addRow("", provider_save_btn)
+        self.provider_form.addRow("", provider_save_btn)
         
-        provider_layout.addLayout(provider_form)
+        provider_layout.addLayout(self.provider_form)
         
         self.provider_toggle_btn = QPushButton("Start Provider")
         self.provider_toggle_btn.setObjectName("actionButton")
@@ -469,6 +619,9 @@ class ThinkfarmApp(QMainWindow):
         self.main_splitter.setSizes([580, 820])
  
     def save_config(self):
+        is_managed = self.config_manager.managed_ollama
+        old_models_path = self.config_manager.ollama_models_path
+
         self.config_manager.provider_id = self.provider_id_input.text()
         self.config_manager.consumer_id = self.consumer_id_input.text()
         self.config_manager.port = int(self.client_port_input.text())
@@ -481,7 +634,16 @@ class ThinkfarmApp(QMainWindow):
                 selected.append(m)
         self.config_manager.whitelist_models = selected
         
-        self.config_manager.local_ollama_url = self.local_ollama_input.text()
+        self.config_manager.ollama_models_path = self.models_path_input.text()
+
+        if is_managed:
+            # If transitioning to managed mode, or models path has changed, restart internal server
+            models_path_changed = old_models_path != self.models_path_input.text()
+            if models_path_changed:
+                self.restart_ollama_server()
+        else:
+            self.config_manager.local_ollama_url = self.local_ollama_input.text()
+            
         self.config_manager.auto_manage_models = self.auto_manage_cb.isChecked()
         try:
             self.config_manager.gb_allowed = float(self.gb_allowed_input.text())
@@ -492,24 +654,61 @@ class ThinkfarmApp(QMainWindow):
         self.config_manager.save()
         logging.getLogger("thinkfarm").info("Configuration saved successfully.")
 
+    def toggle_managed_ollama_fields(self):
+        is_managed = self.config_manager.managed_ollama
+        self.local_ollama_input.setEnabled(not is_managed)
+        self.restart_cmd_input.setEnabled(not is_managed)
+        self.models_path_input.setEnabled(is_managed)
+        
+        self.local_ollama_input.setVisible(not is_managed)
+        self.restart_cmd_input.setVisible(not is_managed)
+        self.models_path_input.setVisible(is_managed)
+        
+        # Hide/show the corresponding labels in QFormLayout
+        if hasattr(self, 'provider_form') and self.provider_form:
+            label_url = self.provider_form.labelForField(self.local_ollama_input)
+            if label_url:
+                label_url.setVisible(not is_managed)
+            label_cmd = self.provider_form.labelForField(self.restart_cmd_input)
+            if label_cmd:
+                label_cmd.setVisible(not is_managed)
+            label_path = self.provider_form.labelForField(self.models_path_input)
+            if label_path:
+                label_path.setVisible(is_managed)
+
+        if not is_managed:
+            # If unchecked, restore the original local url if currently set to our managed dynamic URL
+            current_url = self.local_ollama_input.text()
+            if hasattr(self, '_ollama_url') and current_url == self._ollama_url:
+                self.local_ollama_input.setText(self._original_local_url)
+        else:
+            # If checked, set to our dynamic URL
+            if hasattr(self, '_ollama_url'):
+                self.local_ollama_input.setText(self._ollama_url)
+
     def refresh_models(self):
-        """Fetch available models from the local Ollama server in a background thread."""
-        server_url = self.local_ollama_input.text().strip().rstrip('/')
+        """Fetch available models from the central server in a background thread."""
+        server_url = self.config_manager.server_url.strip().rstrip('/')
+        consumer_id = self.config_manager.consumer_id.strip()
+        headers = {}
+        if consumer_id:
+            headers["X-Consumer-ID"] = consumer_id
+            
         def _fetch():
             try:
-                response = requests.get(f"{server_url}/api/tags", timeout=5)
+                response = requests.get(f"{server_url}/api/tags", headers=headers, timeout=10)
                 if response.status_code == 200:
                     models = response.json().get("models", [])
                     self.models_loaded.emit(models)
             except Exception as e:
-                logging.getLogger("thinkfarm").warning(f"Failed to fetch models from Ollama: {e}")
+                logging.getLogger("thinkfarm").warning(f"Failed to fetch models from central server: {e}")
         
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _populate_models(self, models):
         """Populate the whitelist list with models fetched from the server."""
-        is_initial_load = not self.model_vars
-        current_checked = {name for name, cb in self.model_vars.items() if cb.isChecked()}
+        previous_model_vars = self.model_vars
+        current_checked = {name for name, cb in previous_model_vars.items() if cb.isChecked()}
 
         # Clear existing checkboxes
         while self.models_layout.count():
@@ -530,12 +729,13 @@ class ThinkfarmApp(QMainWindow):
             cb.setStyleSheet("margin: 5px; border: none; color: #1c1c1e; font-size: 13px;")
             self.model_vars[name] = cb
             
-            if is_initial_load:
-                if name in self.config_manager.whitelist_models:
+            if name in self.config_manager.whitelist_models:
+                if name in previous_model_vars and name not in current_checked:
+                    cb.setChecked(False)
+                else:
                     cb.setChecked(True)
-            else:
-                if name in current_checked:
-                    cb.setChecked(True)
+            elif name in current_checked:
+                cb.setChecked(True)
 
             cb.setVisible(not filter_text or filter_text in name.lower())
             self.models_layout.addWidget(cb)
@@ -584,6 +784,11 @@ class ThinkfarmApp(QMainWindow):
             self.client_toggle_btn.setText("Start Client Server")
         else:
             self.save_config()
+            if not self.config_manager.consumer_id or not self.config_manager.consumer_id.strip():
+                logging.getLogger("thinkfarm.client").error("Client Server cannot be started: CONSUMER_ID is missing.")
+                self.client_status_lbl.setText("Missing CONSUMER_ID")
+                self.client_indicator.set_status("stopped")
+                return
             logging.getLogger("thinkfarm.client").info("Starting Client Server...")
             app = create_client_app(self.config_manager)
             
@@ -625,7 +830,8 @@ class ThinkfarmApp(QMainWindow):
                     
             p_client = ProviderClient(
                 self.config_manager,
-                status_callback=handle_provider_status
+                status_callback=handle_provider_status,
+                restart_callback=self.restart_ollama_server
             )
             
             self.provider_thread = ProviderThread(p_client)
@@ -658,7 +864,8 @@ class ThinkfarmApp(QMainWindow):
                 loop = asyncio.new_event_loop()
                 p_client = ProviderClient(
                     self.config_manager,
-                    status_callback=self.provider_status_lbl.setText
+                    status_callback=self.provider_status_lbl.setText,
+                    restart_callback=self.restart_ollama_server
                 )
                 try:
                     res = loop.run_until_complete(p_client.restart_ollama())
@@ -692,6 +899,13 @@ class ThinkfarmApp(QMainWindow):
             self.client_thread.stop()
         if self.provider_thread and self.provider_thread.is_alive():
             self.provider_thread.force_stop()
+        
+        self._kill_ollama_process()
+        if hasattr(self, '_ollama_log_file') and self._ollama_log_file is not None:
+            try:
+                self._ollama_log_file.close()
+            except Exception:
+                pass
         event.accept()
 
 if __name__ == "__main__":

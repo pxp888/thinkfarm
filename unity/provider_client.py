@@ -67,10 +67,11 @@ class OllamaClient:
             yield {"error": str(e)}
 
 class ProviderClient:
-    def __init__(self, config: ConfigManager, status_callback=None, log_callback=None):
+    def __init__(self, config: ConfigManager, status_callback=None, log_callback=None, restart_callback=None):
         self.config = config
         self.status_callback = status_callback  # Callback for connection/status updates
         self.log_callback = log_callback        # Callback for provider logs
+        self.restart_callback = restart_callback
         self.running = False
         self.soft_stopping = False
         self.websocket = None
@@ -468,6 +469,15 @@ class ProviderClient:
             endpoint = msg.get("endpoint")
             body = msg.get("body")
             
+            # Ensure the model gets loaded in the background if it's not already loaded
+            requested_model = body.get("model") if body else None
+            if requested_model:
+                is_embed_endpoint = endpoint in ("embed", "embeddings")
+                using_custom = not is_embed_endpoint
+                actual_model = f"thinkfarm-{requested_model}" if using_custom else requested_model
+                if actual_model not in self.loaded_models:
+                    asyncio.create_task(self.keep_model_loaded(actual_model, is_embed_endpoint))
+
             # Start job in background task
             self.current_jobs += 1
             task = asyncio.create_task(self.execute_job(job_id, endpoint, body))
@@ -489,21 +499,13 @@ class ProviderClient:
         self.last_inference_time = time.time()
         # Determine if we have a local custom model mapping
         requested_model = body.get("model")
-        custom_model_name = f"thinkfarm-{requested_model}"
-        using_custom = False
+        is_embed_endpoint = endpoint in ("embed", "embeddings")
+        using_custom = not is_embed_endpoint
+        actual_model = f"thinkfarm-{requested_model}" if using_custom and requested_model else requested_model
         
-        # Check local models to see if the custom model exists
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{self.config.local_ollama_url.rstrip('/')}/api/tags")
-                if resp.status_code == 200:
-                    raw_names = [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
-                    if requested_model and custom_model_name in raw_names:
-                        body["model"] = custom_model_name
-                        using_custom = True
-                        self.log(f"Mapping requested model '{requested_model}' to local custom model '{custom_model_name}'")
-        except Exception as e:
-            self.log(f"Failed to check custom model mapping: {e}", logging.WARNING)
+        if using_custom and requested_model:
+            body["model"] = actual_model
+            self.log(f"Mapping requested model '{requested_model}' to local custom model '{actual_model}'")
 
         # Translate endpoint
         endpoint_map = {
@@ -554,7 +556,7 @@ class ProviderClient:
                         # Decode chunk str
                         chunk_str = chunk_bytes.decode("utf-8", errors="ignore")
                         if using_custom:
-                            chunk_str = chunk_str.replace(custom_model_name, requested_model)
+                            chunk_str = chunk_str.replace(actual_model, requested_model)
                         buffer.append(chunk_str)
                         
                         # Process complete lines for JSON parsing
@@ -692,8 +694,6 @@ class ProviderClient:
             
             # Keep model loaded in VRAM indefinitely
             if requested_model:
-                actual_model = custom_model_name if using_custom else requested_model
-                is_embed_endpoint = endpoint in ("embed", "embeddings")
                 asyncio.create_task(self.keep_model_loaded(actual_model, is_embed_endpoint))
             
             # Proactive reconnection after 30 jobs
@@ -756,7 +756,7 @@ class ProviderClient:
                 "stream": False,
                 "keep_alive": -1
             }
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=300.0) as client:
                 resp = await client.post(url, json=body)
                 return resp.status_code == 200
         except Exception:
@@ -774,7 +774,7 @@ class ProviderClient:
             else:
                 body["prompt"] = ""
             
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=300.0) as client:
                 await client.post(url, json=body)
                 self.loaded_models.add(model_name)
                 self.log(f"Successfully sent keep-alive for {model_name}")
@@ -803,7 +803,8 @@ class ProviderClient:
             
             raw_loaded = await self.get_raw_loaded_models()
             if not raw_loaded:
-                self.log("No models currently loaded in Ollama.")
+                self.log("No models currently loaded in Ollama. Reloading most desirable model...")
+                asyncio.create_task(self.load_most_desirable_model())
                 return
 
             for model_name in raw_loaded:
@@ -907,32 +908,42 @@ class ProviderClient:
             self.websocket = None
             
         # 2) Run the restart command
-        cmd = self.config.ollama_restart_cmd.strip()
-        if not cmd:
-            self.log("No Ollama restart command configured. Skipping command execution.", logging.WARNING)
-        else:
-            self.log(f"Running restart command: {cmd}")
+        if self.config.managed_ollama and hasattr(self, 'restart_callback') and self.restart_callback:
+            self.log("Invoking managed Ollama restart callback...")
             try:
-                # Run the command asynchronously
-                proc = await asyncio.create_subprocess_shell(
-                    cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await proc.communicate()
-                self.log(f"Restart command return code: {proc.returncode}")
-                if stdout:
-                    self.log(f"Restart stdout: {stdout.decode().strip()}")
-                if stderr:
-                    self.log(f"Restart stderr: {stderr.decode().strip()}", logging.ERROR if proc.returncode != 0 else logging.INFO)
+                if asyncio.iscoroutinefunction(self.restart_callback):
+                    await self.restart_callback()
+                else:
+                    self.restart_callback()
             except Exception as e:
-                err_msg = f"Failed to run restart command: {e}"
-                self.log(err_msg, logging.ERROR)
-                if self.status_callback:
-                    self.status_callback(f"Restart failed: {e}")
-                self.restarting_ollama = False
-                self.running = False
-                return "error"
+                self.log(f"Managed Ollama restart callback failed: {e}", logging.ERROR)
+        else:
+            cmd = self.config.ollama_restart_cmd.strip()
+            if not cmd:
+                self.log("No Ollama restart command configured. Skipping command execution.", logging.WARNING)
+            else:
+                self.log(f"Running restart command: {cmd}")
+                try:
+                    # Run the command asynchronously
+                    proc = await asyncio.create_subprocess_shell(
+                        cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, stderr = await proc.communicate()
+                    self.log(f"Restart command return code: {proc.returncode}")
+                    if stdout:
+                        self.log(f"Restart stdout: {stdout.decode().strip()}")
+                    if stderr:
+                        self.log(f"Restart stderr: {stderr.decode().strip()}", logging.ERROR if proc.returncode != 0 else logging.INFO)
+                except Exception as e:
+                    err_msg = f"Failed to run restart command: {e}"
+                    self.log(err_msg, logging.ERROR)
+                    if self.status_callback:
+                        self.status_callback(f"Restart failed: {e}")
+                    self.restarting_ollama = False
+                    self.running = False
+                    return "error"
                 
         # 3) Wait until the tags endpoint is responsive
         self.log("Waiting for local Ollama tags endpoint to respond...")
