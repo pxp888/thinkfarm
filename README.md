@@ -10,19 +10,20 @@ Think Farm consists of two roles:
 
 | Role         | What it does                                                                                                                                                                      |
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Provider** | Registers a node on the Think Farm network, allowing it to serve its local Ollama models to consumers. Optionally auto-manages which models are pulled and loaded based on available storage.                                                           |
-| **Consumer** | Listens to the network for available models and presents them as a local server (`localhost:11435`) with OpenAI-compatible endpoints (`/chat`, `/generate`, `/embeddings`, etc.). |
+| **Provider + Consumer (Unity)** | Full dual-purpose node: serves your local Ollama models to the network *and* consumes models from other nodes, all in one unified app with auto-management. |
+| **Consumer** | Pure consumer — listens to the network for available models and presents them as a local server (`localhost:11435`) with OpenAI-compatible endpoints. No provisioning capability. |
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    ClientApps["Client Apps\n(OpenAI / Ollama compatible)"] -->|HTTP POST| Consumer
+    ClientApps["Client Apps\n(OpenAI / Ollama compatible)"] -->|HTTP POST| Unity
 
-    subgraph Consumer[Consumer]
-        ConsumerAPI["FastAPI Server\nlocalhost:11435"]
-        ConsumerAPI -->|Proxy| OpenAIGW[OpenAI API Gateway]
-        ConsumerAPI -->|Proxy| OllamaGW[Ollama API Gateway]
+    subgraph Unity[Unity App]
+        direction TB
+        UnityAPI["FastAPI Server\nlocalhost:11435"]
+        UnityAPI -->|Proxy| OpenAIGW[OpenAI API Gateway]
+        UnityAPI -->|Proxy| OllamaGW[Ollama API Gateway]
         OpenAIGW & OllamaGW --> Streaming[Streaming Response]
     end
 
@@ -30,45 +31,21 @@ flowchart TB
         WS["WebSocket\nJob Routing"]
     end
 
-    subgraph Provider[Provider]
-        StatusMgmt[Status Management]
-        JobHandler[Job Handler]
-        Mgr["Model Manager\nVRAM Optimization"]
-        Prober["Context Prober\nModel Introspection"]
-    end
+    Unity <--> WS
 
-    Consumer <--> WS <--> Provider
-
-    Provider -->|Model List / Pull / Delete| OllamaCLI
-    Mgr -->|VRAM Calculations| Prober
+    Unity -->|Model List / Pull / Delete| OllamaCLI
+    Mgr["Model Manager\nVRAM Optimization"] --> Prober["Context Prober\nModel Introspection"]
     Prober -->|Query| Ollama["Local Ollama Instance\nlocalhost:11434"]
-    Provider -->|Inference| Ollama
+    Unity -->|Inference| Ollama
 ```
 
 **Data flow:**
 
-1. **Client** sends request to the Consumer's local server (e.g., `http://localhost:11435/v1/chat/completions`)
-2. **Consumer** selects an available model and routes the request via WebSocket to the Think Farm network
-3. **Provider** receives the job, pulls/loads the model on its local Ollama instance if needed, and executes the inference
-4. Results stream back through the network to the Consumer, then to the Client
-
-## Screenshots
-
-### Provider
-
-The Provider GUI lets you set your node's identity, optionally configure model storage preferences, and toggle automatic model management:
-
-![Provider GUI](assets/provider.webp "Think Farm Provider")
-
-The top panel lists remote models available from the network with their VRAM requirements. The bottom panel shows your local provider models with checkboxes for how each should be used (preload, load, as embedding).
-
-### Consumer
-
-The Consumer GUI lists available remote models from the Think Farm network, with VRAM requirements and provider information:
-
-![Consumer GUI](assets/consumer.webp "Think Farm Consumer")
-
-The top panel lists discoverable models with context length, VRAM requirements, and the providing node. The bottom panel shows locally managed models. You can filter and select which models to expose via the local API server.
+1. **Client** sends request to the Unity app's local server (e.g., `http://localhost:11435/v1/chat/completions`)
+2. **Unity** acts as consumer, selecting an available model and routing the request via WebSocket to the Think Farm network
+3. If the requesting node is also a provider, Unity routes locally; otherwise the request goes to another provider on the network
+4. The responding node loads/pulls the model if needed and executes inference
+5. Results stream back through the network to the Unity app, then to the Client
 
 ## Quick Start
 
@@ -85,76 +62,56 @@ The top panel lists discoverable models with context length, VRAM requirements, 
 pip install -r requirements.txt
 ```
 
-### Provider Setup
+### Unity Setup (Provider + Consumer)
 
-The Provider exposes your local Ollama models to the Think Farm network. There are three ways to run it, each targeting a different deployment scenario:
-
-#### 1. Linux — Base Provider (`baseprovider.py`)
-
-The base provider connects to an **existing external Ollama instance** (e.g., already running on `localhost:11434`). This is the recommended option for Linux servers and desktops where Ollama is already installed and managed.
+Unity is the single unified app that acts as both provider and consumer. It has one entry point for all platforms:
 
 ```bash
-python -m provider.baseprovider
+python -m unity.main
 ```
 
-**Key config (in `~/.thinkfarm/config.ini`):**
-- `ollama_url` — URL of your external Ollama instance
-- `provider_id`, `managed_storage_gb`, `auto_manage` — same as below
+**Key config** (in `~/.thinkfarm/config.ini`):
+- `ollama_url` — URL of your external Ollama instance (base provider mode)
+- `ollama_models_path` — Optional custom path for Ollama model storage (managed mode, Windows)
+- `provider_id`, `managed_storage_gb`, `auto_manage` — control model auto-management
 
-No additional Ollama setup needed — it uses whatever Ollama is already running.
+The Unity app starts an internal FastAPI server on `localhost:11435` and handles everything:
+- Discovering remote models from the Think Farm network
+- Serving your own Ollama models to consumers
+- Auto-pulling/unloading models based on VRAM, RAM, and demand
+- Tray-icon aware — minimize to system tray instead of closing
 
-#### 2. Windows — Provider (`provider.py`)
+When `auto_manage` is enabled, the app introspects each model's context window, computes GPU/VRAM requirements, and optimizes your model portfolio within your storage limit.
 
-The Windows provider **manages its own internal Ollama server** automatically — it starts and stops a dedicated Ollama instance on a random port and handles model storage separately. Use this on Windows or any system where you want Think Farm to fully manage Ollama.
+#### Base Provider Mode (Existing Ollama)
 
-```bash
-python -m provider.provider
-```
+If Ollama is already running on an external URL (e.g., `localhost:11434`), configure the URL in `config.ini`:
 
-**Key config (in `~/.thinkfarm/config.ini`):**
-- `ollama_models_path` — Optional custom path for Ollama model storage (e.g., `D:\Ollama\Models`)
-- `provider_id`, `managed_storage_gb`, `auto_manage` — same as below
-
-> **Note:** The Ollama URL is no longer configured manually — the provider starts its own instance internally.
-
-#### 3. Headless — CLI for Servers (`headless.py`)
-
-No GUI at all — a headless mode designed for **headless servers, Docker containers, or systemd services** where terminal interaction is preferred.
-
-```bash
-# Start the provider in the foreground
-python -m provider.headless start
-
-# Check status
-python -m provider.headless status
-
-# Stop the provider
-python -m provider.headless stop
-```
-
-Or use it with systemd:
 ```ini
-[Service]
-ExecStart=python -m provider.headless start
-PIDFile=~/.thinkfarm/provider.pid
-Restart=on-failure
+[provider]
+ollama_url = http://localhost:11434
 ```
 
-| Config option | Purpose |
-|---|---|
-| `ollama_url` | URL of the external Ollama instance to connect to |
-| `provider_id` | Unique identifier for this provider node |
-| `managed_storage_gb` | Maximum disk storage for models (default: 30) |
-| `auto_manage` | Whether to automatically pull/unload models (true/false) |
+Unity will connect to that Ollama instance and use it for serving models.
 
-When auto_manage is enabled, the provider also introspects each model's context window and manages storage within your configured limit.
+#### Managed Mode (Ollama Managed by Unity)
 
-### Consumer Setup
+On Windows or when you want Think Farm to fully manage Ollama, remove `ollama_url` from config. Unity will start and stop its own internal Ollama instance automatically:
 
-The Consumer presents available remote models as a local server compatible with Ollama's API and the OpenAI API format.
+```ini
+[provider]
+# ollama_url removed — unity manages its own Ollama
+ollama_models_path = D:\\Ollama\\Models  ; optional custom storage path
+managed_storage_gb = 30
+auto_manage = true
+```
+
+### Consumer Setup (Pure Consumer)
+
+For users who only want to **consume** models from the network (not provide their own): 
 
 ```bash
-# PyQt6 GUI (recommended)
+# PyQt6 GUI (recommended, cross-platform)
 python -m consumer.qclient
 
 # Legacy Tkinter GUI (deprecated)
@@ -164,22 +121,37 @@ python -m consumer.consumer
 python -m consumer.main
 ```
 
-The Consumer:
+Consumer-only mode connects to the Think Farm network, discovers available models, and exposes them at `localhost:11435` via OpenAI-compatible endpoints. No provisioning capability — use Unity if you need both.
 
-- Connects to the Think Farm network and discovers available models.
-- Runs a local FastAPI server on `localhost:11435`.
-- Proxies `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, and Ollama-compatible endpoints to the selected provider.
-- Supports streaming responses and configurable model whitelisting/filters.
-- Tray-icon aware - minimize to system tray instead of closing.
+## Screenshots
+
+### Unity (Provider + Consumer)
+
+![Unity GUI](assets/banner1.webp "Think Farm Unity")
+
+The top panel lists available models from the network and your local provider models with VRAM requirements. The bottom panel shows connection status, model management controls, and logging.
+
+### Consumer (Standalone)
+
+The standalone Consumer GUI lists available remote models from the Think Farm network, with VRAM requirements and provider information:
+
+![Consumer GUI](assets/consumer.webp "Think Farm Consumer")
+
+The top panel lists discoverable models with context length, VRAM requirements, and the providing node. The bottom panel shows locally managed models. You can filter and select which models to expose via the local API server.
+
 
 ### Configuration
 
-Configuration is stored in `~/.thinkfarm/config.ini`:
+Both Unity and Consumer share the same config file at `~/.thinkfarm/config.ini`. Only the settings you use are required — unused sections can be omitted:
 
 ```ini
 [provider]
-ollama_url = http://localhost:11434
-server_port = 11436
+# Ollama connection: leave empty for Unity-managed mode (internal Ollama)
+ollama_url = http://localhost:11434  ; or remove for managed mode
+ollama_models_path = D:\\Ollama\\Models  ; optional, managed mode only
+provider_id = your-node-name
+managed_storage_gb = 30
+auto_manage = true
 
 [consumer]
 server_url = https://app.thinkfarm.net
@@ -187,7 +159,7 @@ server_port = 11435
 consumer_id = your-unique-id
 ```
 
-An `.env` file can also be used in the project directory:
+An `.env` file can also be used in the **project directory**:
 
 ```ini
 SERVER_URL=https://app.thinkfarm.net
@@ -196,7 +168,7 @@ OLLAMA_URL=http://localhost:11434
 
 ## Endpoints
 
-Once the Consumer is running, it exposes the following endpoints at `http://localhost:11435`:
+Both Unity (when running) and the standalone Consumer expose the following endpoints at `http://localhost:11435`:
 
 ### OpenAI-Compatible
 
@@ -220,54 +192,61 @@ Once the Consumer is running, it exposes the following endpoints at `http://loca
 | `/health`       | GET    | Health check                   |
 | `/version`      | GET    | Version info                   |
 
-## Provider Internals
+## Unity Internals (Provider + Consumer)
+
+Unity merges provider and consumer into a single application. Its components live in `unity/`:
 
 ### Components
 
-| File                         | Purpose                                                                          |
-| ---------------------------- | -------------------------------------------------------------------------------- |
-| `provider/solo.py`           | Core provider logic: status management, job handling, WebSocket communication    |
-| `provider/model_manager.py`  | VRAM-aware model portfolio optimization                                          |
-| `provider/context_prober.py` | Ollama model introspection (context limits, prefill info, model metadata)        |
-| `provider/ollama_client.py`  | Ollama API client wrapper (model list, pull, delete, generate, chat, embeddings) |
-| `provider/provider.py`       | GUI application for the Provider                                                 |
-| `provider/baseprovider.py`   | Base class shared by Provider implementations                                    |
-| `provider/headless.py`       | CLI front-end (start/stop/status via PID)                                        |
+| File | Purpose |
+|---|---|
+| `main.py` | **Entry point** — launches the PyQt6 UI (single entry for all platforms) |
+| `app_gui.py` | Main GUI window: model filtering, tray icon, log display, client/provider toggle |
+| `client_server.py` | FastAPI proxy server: routes requests to local Ollama or remote providers |
+| `config.py` | `ConfigManager` — INI-style config persistence |
+| `context_prober.py` | System probing: GPU VRAM, RAM, context pressure, custom Modelfile management |
+| `model_manager.py` | Model scoring: VRAM-aware portfolio optimization, managed storage |
+| `provider_client.py` | Ollama lifecycle: start/stop/restart, model sync, status heartbeats, job monitoring |
+| `headless.py` | CLI mode for non-GUI environments (`python -m unity.headless`) |
 
 ### Model Management
 
-The Provider uses a three-tier model management system:
+Unity uses a three-tier model management system:
 
-1. **Context Probing** - discovers model context windows and prefill limits by querying Ollama directly.
-2. **Model Manager** - calculates VRAM requirements and optimizes which models to keep loaded.
-3. **Managed Model Loop** - continuously monitors availability and demand, pulling/unloading models to maintain the optimal portfolio.
+1. **Context Probing** — discovers model context windows and prefill limits by querying Ollama directly.
+2. **Model Manager** — calculates VRAM requirements (via NVIDIA GPU probing) and optimizes which models to keep loaded.
+3. **Managed Model Loop** — continuously monitors availability and demand, pulling/unloading models to maintain the optimal portfolio within storage limits.
 
-## Consumer Internals
+## Consumer Internals (Standalone)
 
-| File                   | Purpose                                                                    |
-| ---------------------- | -------------------------------------------------------------------------- |
-| `consumer/main.py`     | FastAPI application: routing, streaming, OpenAI + Ollama API compatibility |
-| `consumer/consumer.py` | **Legacy** — Core Tkinter GUI (deprecated; use `qclient.py`)                |
-| `consumer/qclient.py`  | **Primary** — PyQt6 GUI wrapper with system tray and cross-platform support  |
+For users running only the consumer (`python -m consumer.qclient`):
+
+| File | Purpose |
+|---|---|
+| `consumer/main.py` | FastAPI application: routing, streaming, OpenAI + Ollama API compatibility |
+| `consumer/consumer.py` | **Legacy** — Core Tkinter GUI (deprecated; use `qclient.py`) |
+| `consumer/qclient.py` | **Primary** — PyQt6 GUI wrapper with system tray and cross-platform support |
 
 ### Features
 
-- **Model filtering** - select which remote models to expose locally.
-- **Whitelist management** - control which models are available for inference.
-- **Server health polling** - automatically checks and reconnects to the Think Farm network.
-- **Streaming inference** - supports real-time streaming responses.
-- **System tray** - non-intrusive background operation on desktop.
+- **Model filtering** — select which remote models to expose locally.
+- **Whitelist management** — control which models are available for inference.
+- **Server health polling** — automatically checks and reconnects to the Think Farm network.
+- **Streaming inference** — supports real-time streaming responses.
+- **System tray** — non-intrusive background operation on desktop.
 
 ## Development
 
 ```bash
-# Run the provider in headless mode
-cd provider
-python headless.py start
+# Unity (provider + consumer, all platforms)
+python -m unity.main
 
-# Run the consumer
+# Consumer only (stays behind)
 cd consumer
-python main.py
+python qclient.py
+
+# Headless CLI mode
+python -m unity.headless start
 ```
 
 ## Requirements
@@ -282,6 +261,7 @@ websockets==16.0
 ```
 
 > **Note:** This repository is a partial copy derived from the 2llamashare project.
+
 
 ---
 
