@@ -475,7 +475,7 @@ class ProviderClient:
                 is_embed_endpoint = endpoint in ("embed", "embeddings")
                 using_custom = not is_embed_endpoint
                 actual_model = f"thinkfarm-{requested_model}" if using_custom else requested_model
-                if actual_model not in self.loaded_models:
+                if requested_model not in self.loaded_models:
                     asyncio.create_task(self.keep_model_loaded(actual_model, is_embed_endpoint))
 
             # Start job in background task
@@ -691,11 +691,6 @@ class ProviderClient:
             self.current_jobs -= 1
             self.completed_jobs_count += 1
             await self.send_status(force_full=True)
-            
-            # Keep model loaded in VRAM indefinitely
-            if requested_model:
-                asyncio.create_task(self.keep_model_loaded(actual_model, is_embed_endpoint))
-            
             # Proactive reconnection after 30 jobs
             if not self.soft_stopping and self.completed_jobs_count >= 30 and len(self.active_jobs) == 0:
                 self.log("Completed 30 jobs. Reconnecting WebSocket to refresh routing...")
@@ -1141,3 +1136,4 @@ class ProviderClient:
             self.save_blacklist()
             await self.send_status(force_full=True)
             self.soft_stopping = False
+

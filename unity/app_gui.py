@@ -324,7 +324,7 @@ class ThinkfarmApp(QMainWindow):
         QApplication.quit()
 
     def init_ui(self):
-        self.setWindowTitle("thinkfarm v4")
+        self.setWindowTitle("thinkfarm v6")
         self.resize(1400, 750)
         
         # Stylesheet to match qclient theme
