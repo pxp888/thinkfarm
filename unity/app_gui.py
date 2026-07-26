@@ -9,7 +9,8 @@ import time
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QCheckBox, QGroupBox,
-    QFormLayout, QSplitter, QFrame, QSystemTrayIcon, QMenu, QScrollArea
+    QFormLayout, QSplitter, QFrame, QSystemTrayIcon, QMenu, QScrollArea,
+    QSlider
 )
 import requests
 from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
@@ -324,7 +325,7 @@ class ThinkfarmApp(QMainWindow):
         QApplication.quit()
 
     def init_ui(self):
-        self.setWindowTitle("thinkfarm v6")
+        self.setWindowTitle("thinkfarm v8")
         self.resize(1400, 750)
         
         # Stylesheet to match qclient theme
@@ -420,29 +421,44 @@ class ThinkfarmApp(QMainWindow):
         left_layout.setContentsMargins(10, 10, 10, 10)
 
         # 2. Client Settings
+        self._client_collapsed = False
         client_group = QGroupBox("Client (Ollama Proxy)")
         client_layout = QVBoxLayout(client_group)
-        
+
         status_row1 = QHBoxLayout()
         self.client_indicator = StatusIndicator()
         self.client_status_lbl = QLabel("Stopped")
         status_row1.addWidget(self.client_indicator)
         status_row1.addWidget(self.client_status_lbl)
+
+        self._client_collapse_btn = QPushButton("▼ Collapse")
+        self._client_collapse_btn.setMaximumSize(140, 28)
+        self._client_collapse_btn.setStyleSheet("""
+            QPushButton { background-color: transparent; border: none; font-size: 13px; color: #8e8e93; }
+            QPushButton:hover { color: #548889; }
+        """)
+        self._client_collapse_btn.clicked.connect(self._toggle_client_group)
+        status_row1.addWidget(self._client_collapse_btn)
         status_row1.addStretch()
         
         client_layout.addLayout(status_row1)
-        
+
+        # Content container (collapsible)
+        self._client_content = QWidget()
+        self._client_content_layout = QVBoxLayout(self._client_content)
+        self._client_content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
         client_form = QFormLayout()
         self.consumer_id_input = QLineEdit(self.config_manager.consumer_id)
         self.client_port_input = QLineEdit(str(self.config_manager.port))
         self.whitelist_enabled_cb = QCheckBox("Enable Model Whitelist")
         self.whitelist_enabled_cb.setChecked(self.config_manager.whitelist_enabled)
-        
+
         client_form.addRow("Client ID:", self.consumer_id_input)
         client_form.addRow("Local Port:", self.client_port_input)
         client_form.addRow("", self.whitelist_enabled_cb)
-        
-        client_layout.addLayout(client_form)
+
+        self._client_content_layout.addLayout(client_form)
 
         # Whitelist Section Header
         wl_header_layout = QHBoxLayout()
@@ -450,7 +466,7 @@ class ThinkfarmApp(QMainWindow):
         self.wl_title.setStyleSheet("font-weight: bold; color: #548889;")
         wl_header_layout.addWidget(self.wl_title)
         wl_header_layout.addStretch()
-        
+
         self.refresh_btn = QPushButton("Refresh Models")
         self.refresh_btn.setFixedSize(120, 28)
         self.refresh_btn.setStyleSheet("""
@@ -469,14 +485,14 @@ class ThinkfarmApp(QMainWindow):
         """)
         self.refresh_btn.clicked.connect(self.refresh_models)
         wl_header_layout.addWidget(self.refresh_btn)
-        client_layout.addLayout(wl_header_layout)
+        self._client_content_layout.addLayout(wl_header_layout)
 
         # Filter
         filter_layout = QHBoxLayout()
         self.filter_icon = QLabel("🔍")
         self.filter_icon.setStyleSheet("border: none; color: rgba(0, 0, 0, 0.4);")
         filter_layout.addWidget(self.filter_icon)
-        
+
         self.filter_entry = QLineEdit()
         self.filter_entry.setPlaceholderText("Filter models...")
         self.filter_entry.setStyleSheet("""
@@ -490,12 +506,12 @@ class ThinkfarmApp(QMainWindow):
         """)
         self.filter_entry.textChanged.connect(self.apply_model_filter)
         filter_layout.addWidget(self.filter_entry)
-        client_layout.addLayout(filter_layout)
+        self._client_content_layout.addLayout(filter_layout)
 
         # Select All/None
         toggle_layout = QHBoxLayout()
         toggle_layout.addStretch()
-        
+
         self.select_none_btn = QPushButton("None")
         self.select_all_btn = QPushButton("All")
         for btn in [self.select_none_btn, self.select_all_btn]:
@@ -518,7 +534,7 @@ class ThinkfarmApp(QMainWindow):
         self.select_none_btn.clicked.connect(self.select_none_models)
         toggle_layout.addWidget(self.select_none_btn)
         toggle_layout.addWidget(self.select_all_btn)
-        client_layout.addLayout(toggle_layout)
+        self._client_content_layout.addLayout(toggle_layout)
 
         # Scroll Area for Models
         self.scroll_area = QScrollArea()
@@ -529,32 +545,52 @@ class ThinkfarmApp(QMainWindow):
         self.models_layout = QVBoxLayout(self.models_widget)
         self.models_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll_area.setWidget(self.models_widget)
-        client_layout.addWidget(self.scroll_area)
-        
+        self._client_content_layout.addWidget(self.scroll_area)
+
         client_save_btn = QPushButton("Save Configuration")
         client_save_btn.clicked.connect(self.save_config)
-        client_layout.addWidget(client_save_btn)
+        self._client_content_layout.addWidget(client_save_btn)
 
         self.client_toggle_btn = QPushButton("Start Client Server")
         self.client_toggle_btn.setObjectName("actionButton")
+        self.client_toggle_btn = QPushButton("Start Client Server")
+        self.client_toggle_btn.setObjectName("actionButton")
         self.client_toggle_btn.clicked.connect(self.toggle_client)
-        client_layout.addWidget(self.client_toggle_btn)
-        
+        self._client_content_layout.addWidget(self.client_toggle_btn)
+
+        # Now add content container to group
+        client_layout.addWidget(self._client_content)
+
         left_layout.addWidget(client_group)
 
         # 3. Provider Settings
+        self._provider_collapsed = False
         provider_group = QGroupBox("Provider (Inference Node)")
         provider_layout = QVBoxLayout(provider_group)
-        
+
         status_row2 = QHBoxLayout()
         self.provider_indicator = StatusIndicator()
         self.provider_status_lbl = QLabel("Stopped")
         status_row2.addWidget(self.provider_indicator)
         status_row2.addWidget(self.provider_status_lbl)
+
+        self._provider_collapse_btn = QPushButton("▼ Collapse")
+        self._provider_collapse_btn.setMaximumSize(140, 28)
+        self._provider_collapse_btn.setStyleSheet("""
+            QPushButton { background-color: transparent; border: none; font-size: 13px; color: #8e8e93; }
+            QPushButton:hover { color: #548889; }
+        """)
+        self._provider_collapse_btn.clicked.connect(self._toggle_provider_group)
+        status_row2.addWidget(self._provider_collapse_btn)
         status_row2.addStretch()
         
         provider_layout.addLayout(status_row2)
-        
+
+        # Content container (collapsible)
+        self._provider_content = QWidget()
+        self._provider_content_layout = QVBoxLayout(self._provider_content)
+        self._provider_content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
         self.provider_form = QFormLayout()
         self.provider_id_input = QLineEdit(self.config_manager.provider_id)
         self.local_ollama_input = QLineEdit(self.config_manager.local_ollama_url)
@@ -563,27 +599,43 @@ class ThinkfarmApp(QMainWindow):
         self.auto_manage_cb.setChecked(self.config_manager.auto_manage_models)
         self.gb_allowed_input = QLineEdit(str(self.config_manager.gb_allowed))
         self.restart_cmd_input = QLineEdit(self.config_manager.ollama_restart_cmd)
-        
+
+        self.context_pressure_slider = QSlider(Qt.Orientation.Horizontal)
+        self.context_pressure_slider.setRange(0, 100)
+        self.context_pressure_slider.setValue(int(self.config_manager.context_pressure * 100))
+        self.context_pressure_lbl = QLabel(f"{self.config_manager.context_pressure:.2f}")
+        self.context_pressure_slider.valueChanged.connect(
+            lambda val: self.context_pressure_lbl.setText(f"{val / 100.0:.2f}")
+        )
+
+        pressure_layout = QHBoxLayout()
+        pressure_layout.addWidget(self.context_pressure_slider)
+        pressure_layout.addWidget(self.context_pressure_lbl)
+
         self.provider_form.addRow("Provider ID:", self.provider_id_input)
         self.provider_form.addRow("Local Ollama URL:", self.local_ollama_input)
         self.provider_form.addRow("Model Storage Path:", self.models_path_input)
         self.provider_form.addRow("", self.auto_manage_cb)
         self.provider_form.addRow("GB Allowed:", self.gb_allowed_input)
         self.provider_form.addRow("Ollama Restart Command:", self.restart_cmd_input)
-        
+        self.provider_form.addRow("Context Pressure:", pressure_layout)
+
         self.toggle_managed_ollama_fields()
 
         provider_save_btn = QPushButton("Save Configuration")
         provider_save_btn.clicked.connect(self.save_config)
         self.provider_form.addRow("", provider_save_btn)
-        
-        provider_layout.addLayout(self.provider_form)
+
+        self._provider_content_layout.addLayout(self.provider_form)
         
         self.provider_toggle_btn = QPushButton("Start Provider")
         self.provider_toggle_btn.setObjectName("actionButton")
         self.provider_toggle_btn.clicked.connect(self.toggle_provider)
-        provider_layout.addWidget(self.provider_toggle_btn)
-        
+        self._provider_content_layout.addWidget(self.provider_toggle_btn)
+
+        # Now add content container to group
+        provider_layout.addWidget(self._provider_content)
+
         left_layout.addWidget(provider_group)
         left_layout.addStretch()
         
@@ -650,6 +702,7 @@ class ThinkfarmApp(QMainWindow):
         except ValueError:
             self.config_manager.gb_allowed = 0.0
         self.config_manager.ollama_restart_cmd = self.restart_cmd_input.text()
+        self.config_manager.context_pressure = self.context_pressure_slider.value() / 100.0
         
         self.config_manager.save()
         logging.getLogger("thinkfarm").info("Configuration saved successfully.")
@@ -886,6 +939,22 @@ class ThinkfarmApp(QMainWindow):
             self.resize(1400, self.height())
             self.main_splitter.setSizes([580, 820])
             self.toggle_log_btn.setText("Hide Activity Log")
+
+    def _toggle_client_group(self):
+        self._client_collapsed = not self._client_collapsed
+        visible = not self._client_collapsed
+        self._client_content.setVisible(visible)
+        arrow = "\u25b6" if self._client_collapsed else "\u25bc"
+        label = "Expand" if self._client_collapsed else "Collapse"
+        self._client_collapse_btn.setText(f"{arrow} {label}")
+
+    def _toggle_provider_group(self):
+        self._provider_collapsed = not self._provider_collapsed
+        visible = not self._provider_collapsed
+        self._provider_content.setVisible(visible)
+        arrow = "\u25b6" if self._provider_collapsed else "\u25bc"
+        label = "Expand" if self._provider_collapsed else "Collapse"
+        self._provider_collapse_btn.setText(f"{arrow} {label}")
 
     def closeEvent(self, event):
         # Minimize to tray instead of quitting if the tray icon is visible

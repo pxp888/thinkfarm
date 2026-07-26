@@ -29,6 +29,7 @@ class ConfigManager:
         self.ollama_restart_cmd: str = ""
         self.managed_ollama: bool = os.name == "nt"
         self.ollama_models_path: str = ""
+        self.context_pressure: float = 0.9
 
         self.load()
 
@@ -101,6 +102,12 @@ class ConfigManager:
         self.ollama_restart_cmd = v(self._SECTION_PROVIDER, "OLLAMA_RESTART_CMD", "") or ""
         self.ollama_models_path = v(self._SECTION_PROVIDER, "OLLAMA_MODELS_PATH", "") or ""
 
+        cp = v(self._SECTION_PROVIDER, "CONTEXT_PRESSURE", "0.9") or "0.9"
+        try:
+            self.context_pressure = float(cp)
+        except ValueError:
+            self.context_pressure = 0.9
+
         # Booleans
         wl_en = v(self._SECTION_CONSUMER, "WHITELIST_ENABLED", "false") or "false"
         self.whitelist_enabled = wl_en.lower() == "true"
@@ -142,6 +149,7 @@ class ConfigManager:
         raw.set(self._SECTION_PROVIDER, "GB_ALLOWED", str(self.gb_allowed))
         raw.set(self._SECTION_PROVIDER, "OLLAMA_RESTART_CMD", self.ollama_restart_cmd)
         raw.set(self._SECTION_PROVIDER, "OLLAMA_MODELS_PATH", self.ollama_models_path)
+        raw.set(self._SECTION_PROVIDER, "CONTEXT_PRESSURE", f"{self.context_pressure:.2f}")
 
         os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
         with open(self.config_path, "w", encoding="utf-8") as f:
