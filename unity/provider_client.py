@@ -162,6 +162,9 @@ class ProviderClient:
                     self._cached_raw_models = []
         
         models = self._cached_raw_models
+        raw_thinkfarm_names = {
+            m.get("name") for m in models if m.get("name", "").startswith("thinkfarm-")
+        }
         active_models = []
         seen_names = set()
         for m in models:
@@ -172,8 +175,13 @@ class ProviderClient:
             if name.startswith("thinkfarm-"):
                 name = name[10:]
                 m_copy["name"] = name
-            if only_probed and name not in self.context_limits:
-                continue
+            if only_probed:
+                limit = self.context_limits.get(name)
+                if limit is None or limit == 0:
+                    continue
+                # For generative models (limit > 0), ensure custom thinkfarm- model variant exists in Ollama
+                if limit > 0 and f"thinkfarm-{name}" not in raw_thinkfarm_names:
+                    continue
             if name not in self.blacklisted_models:
                 if name not in seen_names:
                     active_models.append(m_copy)
@@ -281,6 +289,8 @@ class ProviderClient:
                     self.status_callback("Probing")
                 
                 try:
+                    for m in await self.get_raw_loaded_models():
+                        await self.unload_model(m)
                     from context_prober import run_context_probing, load_context_limits
                     models = await self.get_local_models(only_probed=False)
                     model_names = [m.get("name") for m in models if m.get("name")]
@@ -394,7 +404,9 @@ class ProviderClient:
             baselines = self.performance_baselines
             
             for m in model_names:
-                if m not in limits:
+                if m.startswith("thinkfarm-") or m.endswith(":cloud"):
+                    continue
+                if m not in limits or limits[m] == 0:
                     return True
                 if limits[m] > 0 and m not in baselines:
                     return True
@@ -786,6 +798,20 @@ class ProviderClient:
         except Exception as e:
             self.log(f"Local Ollama raw loaded models query failed: {e}", logging.WARNING)
         return []
+    async def unload_model(self, model_name: str):
+        try:
+            is_embed = "embed" in model_name.lower()
+            url = f"{self.config.local_ollama_url.rstrip('/')}/api/embed" if is_embed else f"{self.config.local_ollama_url.rstrip('/')}/api/generate"
+            body = {"model": model_name, "keep_alive": 0}
+            if is_embed:
+                body["input"] = ""
+            else:
+                body["prompt"] = ""
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(url, json=body)
+                self.loaded_models.discard(model_name)
+        except Exception as e:
+            self.log(f"Failed to unload model {model_name}: {e}", logging.WARNING)
 
     async def run_heartbeat_check(self):
         if not self.running or self.current_jobs > 0:
@@ -822,6 +848,13 @@ class ProviderClient:
                     self.log(f"Heartbeat exception for {model_name}: {e}", logging.WARNING)
 
     async def load_most_desirable_model(self):
+        if not self.running or self.current_jobs > 0 or getattr(self, "soft_stopping", False) or getattr(self, "probing_triggered", False):
+            return
+        if await self.check_for_new_models():
+            return
+        if await self.get_raw_loaded_models():
+            return
+
         self.log("Attempting to load the most desirable model on startup...")
         try:
             # 1. Fetch demand chart

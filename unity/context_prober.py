@@ -173,8 +173,35 @@ def _sync_recreate_custom_models(limits: Dict[str, int]) -> None:
                         
         print(f"{_PFX} Recreating custom models on startup with context_pressure={context_pressure}...")
         
+        # Query installed local models from Ollama to skip deleted models and clean up orphaned thinkfarm models
+        installed_models = None
+        thinkfarm_models = set()
+        try:
+            tags_url = local_ollama_url.rstrip("/") + "/api/tags"
+            tags_resp = httpx.get(tags_url, timeout=5.0)
+            if tags_resp.status_code == 200:
+                raw_tags = [m.get("name") for m in tags_resp.json().get("models", []) if m.get("name")]
+                installed_models = set(raw_tags)
+                thinkfarm_models = {t for t in raw_tags if t.startswith("thinkfarm-")}
+        except Exception:
+            pass
+
+        # Remove orphaned thinkfarm- models whose base models no longer exist
+        if installed_models is not None:
+            for tf_name in thinkfarm_models:
+                base_name = tf_name[10:]
+                if base_name not in installed_models:
+                    print(f"{_PFX} Cleaning up orphaned custom model {tf_name} (base model {base_name} no longer exists)...")
+                    try:
+                        del_url = local_ollama_url.rstrip("/") + "/api/delete"
+                        httpx.request("DELETE", del_url, json={"name": tf_name}, timeout=10.0)
+                    except Exception as e:
+                        print(f"{_PFX} WARNING: Failed to delete orphaned model {tf_name}: {e}")
+
         for model_name, limit in limits.items():
             if limit <= 0:
+                continue
+            if installed_models is not None and model_name not in installed_models:
                 continue
                 
             try:
@@ -183,16 +210,15 @@ def _sync_recreate_custom_models(limits: Dict[str, int]) -> None:
                 resp = httpx.post(show_url, json={"model": model_name}, timeout=10.0)
                 if resp.status_code == 400:
                     resp = httpx.post(show_url, json={"name": model_name}, timeout=10.0)
+                if resp.status_code == 404:
+                    continue
                 resp.raise_for_status()
                 info = resp.json()
                 
                 # Eligibility check: skip cloud and custom models.
                 remote_host = info.get("remote_host")
                 remote_model = info.get("remote_model")
-                parent = (info.get("details", {}) or {}).get("parent_model", "")
-                is_eligible = not (remote_host or remote_model)
-                if parent and not (parent.startswith("/") or "sha256" in parent):
-                    is_eligible = False
+                is_eligible = not (remote_host or remote_model or model_name.startswith("thinkfarm-") or model_name.endswith(":cloud"))
                     
                 if not is_eligible:
                     print(f"{_PFX}  Skipping {model_name} for custom model recreation: not an eligible local model.")
@@ -462,13 +488,9 @@ async def _get_model_info(base_url: str, model_name: str) -> tuple[int, bool, bo
             raise ValueError(f"/api/show returned non-dict: {info!r}")
 
         # Eligibility check: skip cloud and custom models.
-        # Allow official models that use internal blob paths/digests in parent_model.
         remote_host = info.get("remote_host")
         remote_model = info.get("remote_model")
-        parent = (info.get("details", {}) or {}).get("parent_model", "")
-        is_eligible = not (remote_host or remote_model)
-        if parent and not (parent.startswith("/") or "sha256" in parent):
-            is_eligible = False
+        is_eligible = not (remote_host or remote_model or model_name.startswith("thinkfarm-") or model_name.endswith(":cloud"))
 
         # Detect embedding-only models: they have no chat/generate template,
         # or they explicitly list 'embedding' in capabilities, or use a known architecture.
@@ -917,7 +939,9 @@ async def _probe_new_models(
 
     to_probe = []
     for m in model_names:
-        if m not in limits:
+        if m.startswith("thinkfarm-") or m.endswith(":cloud"):
+            continue
+        if m not in limits or limits[m] == 0:
             to_probe.append(m)
         elif limits[m] > 0 and m not in baselines:
             to_probe.append(m)
@@ -992,6 +1016,25 @@ async def _probe_new_models(
         except OllamaConnectionError as e:
             print(f"{_PFX} ERROR: Probing aborted due to Ollama server connection loss: {e}")
             return limits
+
+    # Clean up any orphaned thinkfarm- models whose base models no longer exist
+    raw_names = await get_ollama_models(base_url)
+    try:
+        async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
+            resp = await client.get("/api/tags")
+            if resp.status_code == 200:
+                all_tags = [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
+                for tag in all_tags:
+                    if tag.startswith("thinkfarm-"):
+                        base = tag[10:]
+                        if base not in raw_names:
+                            print(f"{_PFX} Cleaning up orphaned custom model {tag}...")
+                            try:
+                                await client.request("DELETE", "/api/delete", json={"name": tag})
+                            except Exception as e:
+                                print(f"{_PFX} WARNING: Failed to delete orphaned model {tag}: {e}")
+    except Exception as e:
+        print(f"{_PFX} WARNING: Failed to query models for orphaned custom model cleanup: {e}")
 
     # Always ensure custom 'thinkfarm-' models exist/are recreated for all eligible local models,
     # not just those that went through probing. Uses fresh context_pressure from config.
