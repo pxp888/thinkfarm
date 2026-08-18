@@ -97,7 +97,10 @@ class ProviderClient:
     def load_context_limits(self):
         try:
             from context_prober import load_context_limits as load_limits
-            self.context_limits = load_limits()
+            self.context_limits = load_limits(
+                local_ollama_url=self.config.local_ollama_url,
+                context_pressure=self.config.context_pressure,
+            )
         except Exception as e:
             self.log(f"Failed to load context limits: {e}", logging.ERROR)
             self.context_limits = {}
@@ -294,8 +297,14 @@ class ProviderClient:
                     from context_prober import run_context_probing, load_context_limits
                     models = await self.get_local_models(only_probed=False)
                     model_names = [m.get("name") for m in models if m.get("name")]
-                    limits = load_context_limits()
-                    await run_context_probing(self.config.local_ollama_url, model_names, limits)
+                    limits = load_context_limits(
+                        local_ollama_url=self.config.local_ollama_url,
+                        context_pressure=self.config.context_pressure,
+                    )
+                    await run_context_probing(
+                        self.config.local_ollama_url, model_names, limits,
+                        self.config.context_pressure,
+                    )
                     self.load_context_limits()
                     self.load_performance_baselines()
                 except Exception as e:

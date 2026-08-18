@@ -5,7 +5,6 @@ import asyncio
 import logging
 import signal
 import sys
-from pathlib import Path
 
 # Ensure PyQt6-related speedups are never imported (saves time/memory)
 sys.modules["websockets.speedups"] = None
@@ -22,7 +21,7 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    config = ConfigManager(str(Path(__file__).resolve().parent))
+    config = ConfigManager()
 
     shutdown_event = asyncio.Event()
 

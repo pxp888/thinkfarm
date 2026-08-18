@@ -18,7 +18,6 @@ Results are persisted to gpu_context_limits.json next to this file so that
 """
 
 import asyncio
-import configparser
 import json
 import os
 import platform
@@ -37,22 +36,29 @@ _IS_MACOS_UNIFIED = platform.system() == "Darwin" and "arm64" in platform.machin
 _CACHE_FILE = os.path.expanduser("~/.thinkfarm/gpu_context_limits.json")
 _BASELINES_FILE = os.path.expanduser("~/.thinkfarm/performance_baselines.json")
 
-# Fraction of discovered GPU limit to use for custom models (0.9 is safe baseline).
-# Read from ~/.thinkfarm/config.ini [provider] context_pressure, default 0.9.
-def _get_context_pressure() -> float:
-    """Load context_pressure from config.ini, defaulting to 0.9."""
+# Context pressure: single source of truth is ConfigManager (config.py, default 0.9).
+# Callers that own a ConfigManager should pass their value explicitly; the
+# resolver below only kicks in for callers that don't have one.
+def _resolve_context_pressure(context_pressure: Optional[float] = None) -> float:
+    """Return *context_pressure* if given, otherwise the ConfigManager value."""
+    if context_pressure is not None:
+        return context_pressure
     try:
-        config_dir = os.path.expanduser("~/.thinkfarm")
-        config_path = os.path.join(config_dir, "config.ini")
-        if not os.path.exists(config_path):
-            return 0.9
-        config = configparser.ConfigParser()
-        config.read(config_path)
-        if config.has_section("provider") and config.has_option("provider", "context_pressure"):
-            return float(config.get("provider", "context_pressure"))
+        from config import ConfigManager
+        return ConfigManager().context_pressure
     except Exception:
-        pass
-    return 0.9
+        return 0.9  # last resort: config.py unavailable
+
+
+def _resolve_local_ollama_url(local_ollama_url: Optional[str] = None) -> str:
+    """Return *local_ollama_url* if given, otherwise the ConfigManager value."""
+    if local_ollama_url and local_ollama_url.strip():
+        return local_ollama_url.strip()
+    try:
+        from config import ConfigManager
+        return ConfigManager().local_ollama_url
+    except Exception:
+        return "http://localhost:11434"
 
 # Smallest context size we will probe (powers-of-two friendlier than 1)
 _MIN_CTX = 512
@@ -148,29 +154,16 @@ _MIN_FREE_RAM_MB = 2048  # 2 GB
 _recreated_custom_models = False
 
 
-def _sync_recreate_custom_models(limits: Dict[str, int]) -> None:
+def _sync_recreate_custom_models(
+    limits: Dict[str, int],
+    local_ollama_url: Optional[str] = None,
+    context_pressure: Optional[float] = None,
+) -> None:
     """Synchronously recreate custom models in Ollama on startup."""
     try:
-        # Load local_ollama_url and context_pressure
-        config_dir = os.path.expanduser("~/.thinkfarm")
-        config_path = os.path.join(config_dir, "config.ini")
-        local_ollama_url = "http://localhost:11434"
-        context_pressure = 0.9
-        
-        if os.path.exists(config_path):
-            config = configparser.ConfigParser()
-            config.read(config_path)
-            if config.has_section("provider"):
-                if config.has_option("provider", "local_ollama_url"):
-                    val = config.get("provider", "local_ollama_url").strip()
-                    if val:
-                        local_ollama_url = val
-                if config.has_option("provider", "context_pressure"):
-                    try:
-                        context_pressure = float(config.get("provider", "context_pressure"))
-                    except Exception:
-                        pass
-                        
+        local_ollama_url = _resolve_local_ollama_url(local_ollama_url)
+        context_pressure = _resolve_context_pressure(context_pressure)
+
         print(f"{_PFX} Recreating custom models on startup with context_pressure={context_pressure}...")
         
         # Query installed local models from Ollama to skip deleted models and clean up orphaned thinkfarm models
@@ -253,7 +246,10 @@ def _sync_recreate_custom_models(limits: Dict[str, int]) -> None:
         print(f"{_PFX} WARNING: Error in _sync_recreate_custom_models: {e}")
 
 
-def load_context_limits() -> Dict[str, int]:
+def load_context_limits(
+    local_ollama_url: Optional[str] = None,
+    context_pressure: Optional[float] = None,
+) -> Dict[str, int]:
     """Load previously discovered limits from disk. Returns {} on first run."""
     global _recreated_custom_models
     
@@ -269,8 +265,8 @@ def load_context_limits() -> Dict[str, int]:
             
         if not _recreated_custom_models:
             _recreated_custom_models = True
-            _sync_recreate_custom_models(data)
-            
+            _sync_recreate_custom_models(data, local_ollama_url, context_pressure)
+        
         return data
     except Exception as e:
         print(f"{_PFX} WARNING: could not read cache file ({e}). Starting fresh.")
@@ -863,14 +859,20 @@ async def _find_max_gpu_ctx(
 # ---------------------------------------------------------------------------
 
 
-async def create_custom_model(base_url: str, original_model: str, max_ctx: int) -> bool:
+async def create_custom_model(
+    base_url: str,
+    original_model: str,
+    max_ctx: int,
+    context_pressure: Optional[float] = None,
+) -> bool:
     """
     Create a custom model in Ollama based on original_model with a fixed context window.
     The custom model is prefixed with 'thinkfarm-'.
     """
     custom_model_name = f"thinkfarm-{original_model}"
-    adjusted_ctx = int(max_ctx * _get_context_pressure())
-    print(f"{_PFX} Ensuring custom model {custom_model_name} exists with num_ctx={adjusted_ctx} (90% of discovered {max_ctx})..." if max_ctx > 0 else f"{_PFX} Ensuring custom model {custom_model_name} exists with full training context...")
+    pressure = _resolve_context_pressure(context_pressure)
+    adjusted_ctx = int(max_ctx * min(pressure, 1.0))
+    print(f"{_PFX} Ensuring custom model {custom_model_name} exists with num_ctx={adjusted_ctx} ({pressure:.2f} x discovered {max_ctx})...")
     try:
         async with httpx.AsyncClient(base_url=base_url, timeout=60.0) as client:
             resp = await client.post(
@@ -901,6 +903,7 @@ async def run_context_probing(
     base_url: str,
     model_names: list,
     existing_limits: Dict[str, int],
+    context_pressure: Optional[float] = None,
 ) -> Dict[str, int]:
     """
     Probe any model in *model_names* that is NOT already in *existing_limits*.
@@ -916,6 +919,7 @@ async def run_context_probing(
         base_url=base_url,
         model_names=model_names,
         existing_limits=limits,
+        context_pressure=context_pressure,
     )
 
 
@@ -923,6 +927,7 @@ async def _probe_new_models(
     base_url: str,
     model_names: list,
     existing_limits: Dict[str, int],
+    context_pressure: Optional[float] = None,
 ) -> Dict[str, int]:
     """
     Probe models that are not yet in the cache or lack a performance baseline.
@@ -933,9 +938,6 @@ async def _probe_new_models(
     limits = dict(existing_limits)
     baselines_data = load_performance_baselines()
     baselines = baselines_data.get("baselines", {})
-
-    # Load fresh context_pressure from config at startup to always honour the user's setting.
-    context_pressure = _get_context_pressure()
 
     to_probe = []
     for m in model_names:
@@ -1049,8 +1051,8 @@ async def _probe_new_models(
             print(f"{_PFX}  Skipping {model_name} for custom model: not an eligible local model.")
             continue
         
-        # Recreate the custom model. create_custom_model will apply the context_pressure.
-        await create_custom_model(base_url, model_name, limit)
+        # Recreate the custom model. create_custom_model applies context_pressure.
+        await create_custom_model(base_url, model_name, limit, context_pressure)
 
     print(f"{_PFX} ----- ----- ----- ----- ----- ----- ----- ----- ----- -----")
     print(f"{_PFX} Probing complete. Summary:")

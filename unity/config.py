@@ -9,7 +9,7 @@ class ConfigManager:
     _SECTION_CONSUMER = "consumer"
 
     def __init__(self, workspace_dir=None):
-        self.workspace_dir = Path(workspace_dir or "/home/pxperrine/Documents/code/unity")
+        self.workspace_dir = Path(workspace_dir or Path(__file__).resolve().parent)
         self.env_path = self.workspace_dir / ".env"
         self.config_dir = Path(os.path.expanduser("~/.thinkfarm"))
         self.config_dir.mkdir(parents=True, exist_ok=True)
