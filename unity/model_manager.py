@@ -677,7 +677,7 @@ class ModelManager:
                 target_managed_models[c["model"]] = c
                 current_usage_bytes += c["size_bytes"]
             else:
-                break
+                continue
 
         # 5. Handle Displacement & Fill leftover quota with existing models
         manifest_sizes = {}

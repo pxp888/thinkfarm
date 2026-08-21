@@ -5,6 +5,7 @@ import json
 import logging
 import time
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 import httpx
@@ -567,74 +568,41 @@ class ProviderClient:
                         raise Exception(f"Local Ollama returned {resp.status_code}: {err_content}")
                     
                     # Accumulate and batch chunks in ~75ms windows
-                    buffer = []
+                    out_lines = []
                     line_buffer = ""
                     last_send_time = time.time()
-                    
+
                     separator = "\n\n" if "v1/" in endpoint else "\n"
-                    
-                    async for chunk_bytes in resp.aiter_bytes():
-                        # Decode chunk str
-                        chunk_str = chunk_bytes.decode("utf-8", errors="ignore")
-                        if using_custom:
-                            chunk_str = chunk_str.replace(actual_model, requested_model)
-                        buffer.append(chunk_str)
-                        
-                        # Process complete lines for JSON parsing
-                        line_buffer += chunk_str
-                        while separator in line_buffer:
-                            line, line_buffer = line_buffer.split(separator, 1)
-                            if not line.strip():
-                                continue
-                            try:
-                                # Try to extract eval details
-                                if "v1/" in endpoint:
-                                    if line.startswith("data:"):
-                                        line_clean = line[5:].strip()
-                                        if line_clean != "[DONE]":
-                                            chunk_json = json.loads(line_clean)
-                                            if "usage" in chunk_json and chunk_json["usage"]:
-                                                eval_count = chunk_json["usage"].get("completion_tokens", eval_count)
-                                                prompt_eval_count = chunk_json["usage"].get("prompt_tokens", prompt_eval_count)
-                                                has_output = True
-                                            elif "choices" in chunk_json and chunk_json["choices"]:
-                                                choice = chunk_json["choices"][0]
-                                                if "delta" in choice and choice["delta"].get("content"):
-                                                    has_output = True
-                                else:
-                                    chunk_json = json.loads(line)
-                                    if "eval_count" in chunk_json:
-                                        eval_count = chunk_json.get("eval_count", eval_count)
-                                        prompt_eval_count = chunk_json.get("prompt_eval_count", prompt_eval_count)
-                                    if chunk_json.get("response") or chunk_json.get("message", {}).get("content"):
-                                        has_output = True
-                            except Exception:
-                                pass
-                        
-                        current_time = time.time()
-                        if current_time - last_send_time >= 0.075:
-                            combined_data = "".join(buffer)
-                            await self.websocket.send(json.dumps({
-                                "type": "chunk",
-                                "job_id": job_id,
-                                "data": combined_data
-                            }))
-                            buffer = []
-                            last_send_time = current_time
-                            
-                    # Parse remaining line buffer
-                    if line_buffer.strip():
+
+                    # De-aliasing happens on COMPLETED lines and only matches the
+                    # value of the "model" field, so names where one is a substring
+                    # of another (e.g., "bge" vs "bge-m3") or model names echoed
+                    # inside response content are left untouched.
+                    alias_pat = None
+                    if using_custom:
+                        alias_pat = re.compile(
+                            r'"model"\s*:\s*"' + re.escape(actual_model) + r'"')
+                    alias_repl = '"model":"' + requested_model + '"'
+
+                    def extract_stats(line: str):
+                        nonlocal eval_count, prompt_eval_count, has_output
+                        # Parse for eval stats only; forwarded text is unaffected.
                         try:
-                            line = line_buffer
                             if "v1/" in endpoint:
-                                if line.startswith("data:"):
-                                    line_clean = line[5:].strip()
-                                    if line_clean != "[DONE]":
-                                        chunk_json = json.loads(line_clean)
-                                        if "usage" in chunk_json and chunk_json["usage"]:
-                                            eval_count = chunk_json["usage"].get("completion_tokens", eval_count)
-                                            prompt_eval_count = chunk_json["usage"].get("prompt_tokens", prompt_eval_count)
-                                            has_output = True
+                                if not line.startswith("data:"):
+                                    return
+                                line_clean = line[5:].strip()
+                                if line_clean == "[DONE]":
+                                    return
+                                chunk_json = json.loads(line_clean)
+                                if "usage" in chunk_json and chunk_json["usage"]:
+                                    eval_count = chunk_json["usage"].get("completion_tokens", eval_count)
+                                    prompt_eval_count = chunk_json["usage"].get("prompt_tokens", prompt_eval_count)
+                                    has_output = True
+                                elif "choices" in chunk_json and chunk_json["choices"]:
+                                    choice = chunk_json["choices"][0]
+                                    if "delta" in choice and choice["delta"].get("content"):
+                                        has_output = True
                             else:
                                 chunk_json = json.loads(line)
                                 if "eval_count" in chunk_json:
@@ -644,13 +612,44 @@ class ProviderClient:
                                     has_output = True
                         except Exception:
                             pass
-                            
-                    # Send remaining buffer
-                    if buffer:
+
+                    async for chunk_bytes in resp.aiter_bytes():
+                        # Decode chunk str
+                        chunk_str = chunk_bytes.decode("utf-8", errors="ignore")
+                        # Extract complete lines for stats + de-aliasing
+                        line_buffer += chunk_str
+                        while separator in line_buffer:
+                            line, line_buffer = line_buffer.split(separator, 1)
+                            if not line.strip():
+                                continue
+                            extract_stats(line)
+                            if alias_pat:
+                                line = alias_pat.sub(alias_repl, line)
+                            out_lines.append(line)
+
+                        current_time = time.time()
+                        if current_time - last_send_time >= 0.075 and out_lines:
+                            await self.websocket.send(json.dumps({
+                                "type": "chunk",
+                                "job_id": job_id,
+                                "data": separator.join(out_lines) + separator
+                            }))
+                            out_lines = []
+                            last_send_time = current_time
+
+                    # Tail: final line may lack the trailing separator
+                    if line_buffer.strip():
+                        extract_stats(line_buffer)
+                        if alias_pat:
+                            line_buffer = alias_pat.sub(alias_repl, line_buffer)
+                        out_lines.append(line_buffer)
+
+                    # Send remaining lines
+                    if out_lines:
                         await self.websocket.send(json.dumps({
                             "type": "chunk",
                             "job_id": job_id,
-                            "data": "".join(buffer)
+                            "data": separator.join(out_lines) + separator
                         }))
                 else:
                     # Non-streaming
@@ -703,6 +702,7 @@ class ProviderClient:
 
         except asyncio.CancelledError:
             self.log(f"Job {job_id} was cancelled.")
+            raise  # re-raise so the task is properly marked cancelled (finally still runs first)
         except Exception as e:
             self.log(f"Failed to execute job {job_id}: {e}", logging.ERROR)
         finally:
