@@ -169,27 +169,36 @@ class ProviderClient:
         raw_thinkfarm_names = {
             m.get("name") for m in models if m.get("name", "").startswith("thinkfarm-")
         }
+        # Map logical name -> the ORIGINAL (non-thinkfarm) entry, so the advertised
+        # digest is always the upstream model digest (consistent across all providers),
+        # even when serving via the locally-created thinkfarm- variant.
+        original_by_name = {
+            m.get("name"): m for m in models
+            if m.get("name") and not m["name"].startswith("thinkfarm-")
+        }
         active_models = []
         seen_names = set()
         for m in models:
             name = m.get("name")
             if not name:
                 continue
+            logical_name = name[10:] if name.startswith("thinkfarm-") else name
             m_copy = m.copy()
-            if name.startswith("thinkfarm-"):
-                name = name[10:]
-                m_copy["name"] = name
+            m_copy["name"] = logical_name
             if only_probed:
-                limit = self.context_limits.get(name)
+                limit = self.context_limits.get(logical_name)
                 if limit is None or limit == 0:
                     continue
                 # For generative models (limit > 0), ensure custom thinkfarm- model variant exists in Ollama
-                if limit > 0 and f"thinkfarm-{name}" not in raw_thinkfarm_names:
+                if limit > 0 and f"thinkfarm-{logical_name}" not in raw_thinkfarm_names:
                     continue
-            if name not in self.blacklisted_models:
-                if name not in seen_names:
-                    active_models.append(m_copy)
-                    seen_names.add(name)
+            if logical_name not in self.blacklisted_models and logical_name not in seen_names:
+                # Overwrite the digest with the original model's digest (not the thinkfarm- variant's)
+                original = original_by_name.get(logical_name)
+                if original and original.get("digest"):
+                    m_copy["digest"] = original["digest"]
+                active_models.append(m_copy)
+                seen_names.add(logical_name)
         return active_models
 
     async def get_loaded_models(self):
