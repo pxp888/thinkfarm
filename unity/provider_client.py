@@ -450,14 +450,25 @@ class ProviderClient:
                 return
             job_id = msg.get("job_id")
             model = msg.get("model")
+            digest = msg.get("digest")
             
-            # Check if we support this model and are not blacklisted
-            local_models = [m.get("name") for m in await self.get_local_models(only_probed=True)]
-            if model in local_models:
+            # Check if we support this model (by name or digest) and are not blacklisted
+            probed_models = await self.get_local_models(only_probed=True)
+            matched_model = None
+            for m in probed_models:
+                if model and m.get("name") == model:
+                    matched_model = m
+                    break
+                if digest and m.get("digest") == digest:
+                    matched_model = m
+                    break
+
+            if matched_model:
+                local_model_name = matched_model.get("name")
                 # Check context limit if num_ctx is specified
                 num_ctx = msg.get("num_ctx")
                 if num_ctx is not None and num_ctx > 0:
-                    limit = self.context_limits.get(model)
+                    limit = self.context_limits.get(local_model_name)
                     if limit is not None and limit > 0:
                         effective_limit = int(limit * 0.9)
                     elif limit == -1:
@@ -472,8 +483,8 @@ class ProviderClient:
                 # Delay 1.5s if currently busy with other jobs
                 if self.current_jobs > 0:
                     await asyncio.sleep(1.5)
-                # Delay 0.5s if the requested model is not already loaded
-                if model not in self.loaded_models:
+                # Delay 0.5s if the model is not already loaded
+                if local_model_name not in self.loaded_models and model not in self.loaded_models:
                     await asyncio.sleep(0.5)
                 
                 self.log(f"Accepting job {job_id} for model {model}")
@@ -490,19 +501,30 @@ class ProviderClient:
             job_id = msg.get("job_id")
             endpoint = msg.get("endpoint")
             body = msg.get("body")
+            digest = msg.get("digest")
             
             # Ensure the model gets loaded in the background if it's not already loaded
             requested_model = body.get("model") if body else None
             if requested_model:
                 is_embed_endpoint = endpoint in ("embed", "embeddings")
+                probed_models = await self.get_local_models(only_probed=True)
+                local_name = requested_model
+                for m in probed_models:
+                    if m.get("name") == requested_model:
+                        local_name = m.get("name")
+                        break
+                    if digest and m.get("digest") == digest:
+                        local_name = m.get("name")
+                        break
+
                 using_custom = not is_embed_endpoint
-                actual_model = f"thinkfarm-{requested_model}" if using_custom else requested_model
-                if requested_model not in self.loaded_models:
+                actual_model = f"thinkfarm-{local_name}" if using_custom else local_name
+                if local_name not in self.loaded_models and actual_model not in self.loaded_models:
                     asyncio.create_task(self.keep_model_loaded(actual_model, is_embed_endpoint))
 
             # Start job in background task
             self.current_jobs += 1
-            task = asyncio.create_task(self.execute_job(job_id, endpoint, body))
+            task = asyncio.create_task(self.execute_job(job_id, endpoint, body, digest=digest))
             self.active_jobs[job_id] = task
             await self.send_status()
             
@@ -517,17 +539,29 @@ class ProviderClient:
         elif msg_type == "error":
             self.log(f"Server error: {msg.get('detail')}", logging.ERROR)
 
-    async def execute_job(self, job_id: str, endpoint: str, body: dict):
+    async def execute_job(self, job_id: str, endpoint: str, body: dict, digest: str = None):
         self.last_inference_time = time.time()
-        # Determine if we have a local custom model mapping
+        # Determine if we have a local custom model mapping or alias mapping
         requested_model = body.get("model")
         is_embed_endpoint = endpoint in ("embed", "embeddings")
+
+        local_name = requested_model
+        probed_models = await self.get_local_models(only_probed=True)
+        for m in probed_models:
+            if requested_model and m.get("name") == requested_model:
+                local_name = m.get("name")
+                break
+            if digest and m.get("digest") == digest:
+                local_name = m.get("name")
+                break
+
         using_custom = not is_embed_endpoint
-        actual_model = f"thinkfarm-{requested_model}" if using_custom and requested_model else requested_model
+        actual_model = f"thinkfarm-{local_name}" if using_custom and local_name else local_name
         
-        if using_custom and requested_model:
+        if requested_model:
             body["model"] = actual_model
-            self.log(f"Mapping requested model '{requested_model}' to local custom model '{actual_model}'")
+            if actual_model != requested_model:
+                self.log(f"Mapping requested model '{requested_model}' to local model '{actual_model}'")
 
         # Translate endpoint
         endpoint_map = {
@@ -578,10 +612,13 @@ class ProviderClient:
                     # value of the "model" field, so names where one is a substring
                     # of another (e.g., "bge" vs "bge-m3") or model names echoed
                     # inside response content are left untouched.
-                    alias_pat = None
-                    if using_custom:
-                        alias_pat = re.compile(
-                            r'"model"\s*:\s*"' + re.escape(actual_model) + r'"')
+                    alias_pats = []
+                    if actual_model and actual_model != requested_model:
+                        alias_pats.append(re.compile(
+                            r'"model"\s*:\s*"' + re.escape(actual_model) + r'"'))
+                    if local_name and local_name != requested_model and local_name != actual_model:
+                        alias_pats.append(re.compile(
+                            r'"model"\s*:\s*"' + re.escape(local_name) + r'"'))
                     alias_repl = '"model":"' + requested_model + '"'
 
                     def extract_stats(line: str):
@@ -623,8 +660,8 @@ class ProviderClient:
                             if not line.strip():
                                 continue
                             extract_stats(line)
-                            if alias_pat:
-                                line = alias_pat.sub(alias_repl, line)
+                            for pat in alias_pats:
+                                line = pat.sub(alias_repl, line)
                             out_lines.append(line)
 
                         current_time = time.time()
@@ -640,8 +677,8 @@ class ProviderClient:
                     # Tail: final line may lack the trailing separator
                     if line_buffer.strip():
                         extract_stats(line_buffer)
-                        if alias_pat:
-                            line_buffer = alias_pat.sub(alias_repl, line_buffer)
+                        for pat in alias_pats:
+                            line_buffer = pat.sub(alias_repl, line_buffer)
                         out_lines.append(line_buffer)
 
                     # Send remaining lines
@@ -658,7 +695,7 @@ class ProviderClient:
                         raise Exception(f"Local Ollama returned {resp.status_code}: {resp.text}")
                     
                     resp_json = resp.json()
-                    if using_custom and "model" in resp_json:
+                    if (actual_model != requested_model or local_name != requested_model or using_custom) and "model" in resp_json:
                         resp_json["model"] = requested_model
                     
                     if "usage" in resp_json and resp_json["usage"]:

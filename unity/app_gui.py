@@ -1,5 +1,15 @@
 import sys
 import os
+
+# Redirect standard streams if running without a console (e.g. PyInstaller GUI mode)
+if sys.platform == "win32":
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdin is None:
+        sys.stdin = open(os.devnull, "r", encoding="utf-8")
+
 import threading
 import asyncio
 import logging
@@ -17,6 +27,12 @@ from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
 from PyQt6.QtGui import QFont, QColor, QTextCursor, QIcon, QAction
 
 import uvicorn
+import uvicorn.loops.asyncio
+import uvicorn.protocols.http.h11_impl
+import uvicorn.protocols.http.auto
+import uvicorn.protocols.websockets.auto
+import uvicorn.lifespan.on
+import uvicorn.logging
 from config import ConfigManager
 from client_server import create_client_app
 from provider_client import ProviderClient
@@ -66,14 +82,30 @@ class ClientThread(threading.Thread):
         self.loop = None
 
     def run(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="info", loop="asyncio")
-        self.server = uvicorn.Server(config)
+        logger = logging.getLogger("thinkfarm.client")
         try:
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            config = uvicorn.Config(
+                self.app,
+                host=self.host,
+                port=self.port,
+                log_level="info",
+                loop="asyncio",
+                http="h11",
+                lifespan="on",
+                log_config=None,
+            )
+            self.server = uvicorn.Server(config)
             self.loop.run_until_complete(self.server.serve())
+        except Exception as e:
+            logger.error(f"Client Server failed to start: {e}", exc_info=True)
         finally:
-            self.loop.close()
+            if self.loop and not self.loop.is_closed():
+                try:
+                    self.loop.close()
+                except Exception:
+                    pass
 
     def stop(self):
         if self.server:
@@ -325,7 +357,7 @@ class ThinkfarmApp(QMainWindow):
         QApplication.quit()
 
     def init_ui(self):
-        self.setWindowTitle("thinkfarm v11")
+        self.setWindowTitle("thinkfarm v12")
         self.resize(1400, 750)
         
         # Stylesheet to match qclient theme
