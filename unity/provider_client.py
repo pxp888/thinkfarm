@@ -461,16 +461,9 @@ class ProviderClient:
             model = msg.get("model")
             digest = msg.get("digest")
             
-            # Check if we support this model (by name or digest) and are not blacklisted
+            # Check if we support this model by digest and are not blacklisted
             probed_models = await self.get_local_models(only_probed=True)
-            matched_model = None
-            for m in probed_models:
-                if model and m.get("name") == model:
-                    matched_model = m
-                    break
-                if digest and m.get("digest") == digest:
-                    matched_model = m
-                    break
+            matched_model = next((m for m in probed_models if digest and m.get("digest") == digest), None)
 
             if matched_model:
                 local_model_name = matched_model.get("name")
@@ -486,17 +479,17 @@ class ProviderClient:
                         effective_limit = 8192
                     if effective_limit != -1:  # -1 is unlimited
                         if num_ctx > effective_limit:
-                            self.log(f"Ignoring job {job_id} for model {model}: requested num_ctx {num_ctx} exceeds limit {effective_limit}")
+                            self.log(f"Ignoring job {job_id} for digest {digest} ({local_model_name}): requested num_ctx {num_ctx} exceeds limit {effective_limit}")
                             return
 
                 # Delay 1.5s if currently busy with other jobs
                 if self.current_jobs > 0:
                     await asyncio.sleep(1.5)
                 # Delay 0.5s if the model is not already loaded
-                if local_model_name not in self.loaded_models and model not in self.loaded_models:
+                if local_model_name not in self.loaded_models:
                     await asyncio.sleep(0.5)
                 
-                self.log(f"Accepting job {job_id} for model {model}")
+                self.log(f"Accepting job {job_id} for digest {digest} ({local_model_name})")
                 accept_msg = {
                     "type": "accept",
                     "job_id": job_id,
@@ -513,23 +506,16 @@ class ProviderClient:
             digest = msg.get("digest")
             
             # Ensure the model gets loaded in the background if it's not already loaded
-            requested_model = body.get("model") if body else None
-            if requested_model:
+            if digest:
                 is_embed_endpoint = endpoint in ("embed", "embeddings")
                 probed_models = await self.get_local_models(only_probed=True)
-                local_name = requested_model
-                for m in probed_models:
-                    if m.get("name") == requested_model:
-                        local_name = m.get("name")
-                        break
-                    if digest and m.get("digest") == digest:
-                        local_name = m.get("name")
-                        break
-
-                using_custom = not is_embed_endpoint
-                actual_model = f"thinkfarm-{local_name}" if using_custom else local_name
-                if local_name not in self.loaded_models and actual_model not in self.loaded_models:
-                    asyncio.create_task(self.keep_model_loaded(actual_model, is_embed_endpoint))
+                matched = next((m for m in probed_models if m.get("digest") == digest), None)
+                if matched:
+                    local_name = matched.get("name")
+                    using_custom = not is_embed_endpoint
+                    actual_model = f"thinkfarm-{local_name}" if using_custom else local_name
+                    if local_name not in self.loaded_models and actual_model not in self.loaded_models:
+                        asyncio.create_task(self.keep_model_loaded(actual_model, is_embed_endpoint))
 
             # Start job in background task
             self.current_jobs += 1
@@ -550,26 +536,20 @@ class ProviderClient:
 
     async def execute_job(self, job_id: str, endpoint: str, body: dict, digest: str = None):
         self.last_inference_time = time.time()
-        # Determine if we have a local custom model mapping or alias mapping
-        requested_model = body.get("model")
+        # Determine local model mapping via digest
+        requested_model = body.get("model") if body else None
         is_embed_endpoint = endpoint in ("embed", "embeddings")
 
-        local_name = requested_model
         probed_models = await self.get_local_models(only_probed=True)
-        for m in probed_models:
-            if requested_model and m.get("name") == requested_model:
-                local_name = m.get("name")
-                break
-            if digest and m.get("digest") == digest:
-                local_name = m.get("name")
-                break
+        matched = next((m for m in probed_models if digest and m.get("digest") == digest), None)
+        local_name = matched.get("name") if matched else requested_model
 
         using_custom = not is_embed_endpoint
         actual_model = f"thinkfarm-{local_name}" if using_custom and local_name else local_name
         
-        if requested_model:
+        if body and actual_model:
             body["model"] = actual_model
-            if actual_model != requested_model:
+            if requested_model and actual_model != requested_model:
                 self.log(f"Mapping requested model '{requested_model}' to local model '{actual_model}'")
 
         # Translate endpoint

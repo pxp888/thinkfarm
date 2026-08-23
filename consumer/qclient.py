@@ -37,6 +37,11 @@ if not getattr(sys, 'frozen', False):
 import uvicorn
 from main import app as fastapi_app
 
+def resource_path(relative_path: str) -> str:
+    """Get absolute path to resource, works for dev and for PyInstaller."""
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
 class ModelSignals(QObject):
     models_loaded = Signal(list)
 
@@ -49,6 +54,7 @@ class QConsumerGUI(QMainWindow):
         self.server = None
         self.server_thread = None
         self._stop_flag = threading.Event()
+        self._is_quitting = False
         
         self.signals = ModelSignals()
         self.signals.models_loaded.connect(self._populate_models)
@@ -71,7 +77,7 @@ class QConsumerGUI(QMainWindow):
 
     def load_server_url(self):
         """Load SERVER_URL from .env file."""
-        env_path = os.path.join(os.path.dirname(__file__), ".env")
+        env_path = resource_path(".env")
         load_dotenv(env_path)
         self.server_url = os.environ.get("SERVER_URL", "https://app.thinkfarm.net")
 
@@ -144,7 +150,7 @@ class QConsumerGUI(QMainWindow):
         sidebar_layout.setSpacing(10)
 
         # Logo image at top of sidebar
-        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thinkfarm.webp")
+        logo_path = resource_path("thinkfarm.webp")
         pixmap = QPixmap(logo_path)
         if not pixmap.isNull():
             pixmap = pixmap.scaled(
@@ -204,7 +210,7 @@ class QConsumerGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Client v12")
+        self.info_label = QLabel("Client v14")
         self.info_label.setStyleSheet("color: #8e8e93; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -693,7 +699,7 @@ class QConsumerGUI(QMainWindow):
         self.tray_icon = QSystemTrayIcon(self)
         
         # Load icon from the same file used for the logo
-        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "thinkfarm.webp")
+        logo_path = resource_path("thinkfarm.webp")
         if os.path.exists(logo_path):
             self.tray_icon.setIcon(QIcon(logo_path))
         else:
@@ -710,21 +716,34 @@ class QConsumerGUI(QMainWindow):
         self.tray_menu.addSeparator()
         
         exit_action = QAction("Exit", self)
-        exit_action.triggered.connect(self.close)
+        exit_action.triggered.connect(self.quit_application)
         self.tray_menu.addAction(exit_action)
         
         self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.activated.connect(self._on_tray_icon_activated)
         self.tray_icon.show()
 
+    def quit_application(self):
+        """Completely stop services and quit the application."""
+        self._is_quitting = True
+        self.stop_service()
+        if hasattr(self, "tray_icon"):
+            self.tray_icon.hide()
+        self.close()
+        QApplication.quit()
+
     def _on_tray_icon_activated(self, reason):
-        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self.restore_window()
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            if self.isVisible() and not self.isMinimized():
+                self.hide()
+            else:
+                self.restore_window()
 
     def restore_window(self):
         self.show()
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
         self.activateWindow()
+        self.raise_()
 
     def changeEvent(self, event):
         if event.type() == event.Type.WindowStateChange:
@@ -735,11 +754,23 @@ class QConsumerGUI(QMainWindow):
         super().changeEvent(event)
 
     def closeEvent(self, event):
-        self.stop_service()
-        event.accept()
+        if self._is_quitting or not QSystemTrayIcon.isSystemTrayAvailable():
+            self.stop_service()
+            event.accept()
+        else:
+            event.ignore()
+            self.hide()
+            if hasattr(self, "tray_icon") and self.tray_icon.isVisible():
+                self.tray_icon.showMessage(
+                    "thinkfarm Client",
+                    "Application continues running in the background.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    2000
+                )
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     
     # Try to set Inter font if available
     font = QFont("Inter")
