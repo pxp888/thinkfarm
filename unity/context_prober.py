@@ -50,6 +50,17 @@ def _resolve_context_pressure(context_pressure: Optional[float] = None) -> float
         return 0.9  # last resort: config.py unavailable
 
 
+def _resolve_slots(slots: Optional[int] = None) -> int:
+    """Return *slots* if given, otherwise the ConfigManager value (min 1)."""
+    if slots is not None:
+        return max(1, int(slots))
+    try:
+        from config import ConfigManager
+        return max(1, int(ConfigManager().slots))
+    except Exception:
+        return 1  # last resort: config.py unavailable
+
+
 def _resolve_local_ollama_url(local_ollama_url: Optional[str] = None) -> str:
     """Return *local_ollama_url* if given, otherwise the ConfigManager value."""
     if local_ollama_url and local_ollama_url.strip():
@@ -158,13 +169,15 @@ def _sync_recreate_custom_models(
     limits: Dict[str, int],
     local_ollama_url: Optional[str] = None,
     context_pressure: Optional[float] = None,
+    slots: Optional[int] = None,
 ) -> None:
     """Synchronously recreate custom models in Ollama on startup."""
     try:
         local_ollama_url = _resolve_local_ollama_url(local_ollama_url)
         context_pressure = _resolve_context_pressure(context_pressure)
+        slots = _resolve_slots(slots)
 
-        print(f"{_PFX} Recreating custom models on startup with context_pressure={context_pressure}...")
+        print(f"{_PFX} Recreating custom models on startup with context_pressure={context_pressure}, slots={slots}...")
         
         # Query installed local models from Ollama to skip deleted models and clean up orphaned thinkfarm models
         installed_models = None
@@ -218,7 +231,7 @@ def _sync_recreate_custom_models(
                     continue
                     
                 custom_model_name = f"thinkfarm-{model_name}"
-                adjusted_ctx = int(limit * min(context_pressure, 1.0))
+                adjusted_ctx = max(1, int(limit * min(context_pressure, 1.0) / slots))
                 
                 print(f"{_PFX} Recreating custom model {custom_model_name} with num_ctx={adjusted_ctx}...")
                 create_url = local_ollama_url.rstrip("/") + "/api/create"
@@ -249,6 +262,7 @@ def _sync_recreate_custom_models(
 def load_context_limits(
     local_ollama_url: Optional[str] = None,
     context_pressure: Optional[float] = None,
+    slots: Optional[int] = None,
 ) -> Dict[str, int]:
     """Load previously discovered limits from disk. Returns {} on first run."""
     global _recreated_custom_models
@@ -265,7 +279,7 @@ def load_context_limits(
             
         if not _recreated_custom_models:
             _recreated_custom_models = True
-            _sync_recreate_custom_models(data, local_ollama_url, context_pressure)
+            _sync_recreate_custom_models(data, local_ollama_url, context_pressure, slots)
         
         return data
     except Exception as e:
@@ -864,6 +878,7 @@ async def create_custom_model(
     original_model: str,
     max_ctx: int,
     context_pressure: Optional[float] = None,
+    slots: Optional[int] = None,
 ) -> bool:
     """
     Create a custom model in Ollama based on original_model with a fixed context window.
@@ -871,8 +886,9 @@ async def create_custom_model(
     """
     custom_model_name = f"thinkfarm-{original_model}"
     pressure = _resolve_context_pressure(context_pressure)
-    adjusted_ctx = int(max_ctx * min(pressure, 1.0))
-    print(f"{_PFX} Ensuring custom model {custom_model_name} exists with num_ctx={adjusted_ctx} ({pressure:.2f} x discovered {max_ctx})...")
+    slots = _resolve_slots(slots)
+    adjusted_ctx = max(1, int(max_ctx * min(pressure, 1.0) / slots))
+    print(f"{_PFX} Ensuring custom model {custom_model_name} exists with num_ctx={adjusted_ctx} ({pressure:.2f} x discovered {max_ctx} / {slots} slots)...")
     try:
         async with httpx.AsyncClient(base_url=base_url, timeout=60.0) as client:
             resp = await client.post(
@@ -904,6 +920,7 @@ async def run_context_probing(
     model_names: list,
     existing_limits: Dict[str, int],
     context_pressure: Optional[float] = None,
+    slots: Optional[int] = None,
 ) -> Dict[str, int]:
     """
     Probe any model in *model_names* that is NOT already in *existing_limits*.
@@ -920,6 +937,7 @@ async def run_context_probing(
         model_names=model_names,
         existing_limits=limits,
         context_pressure=context_pressure,
+        slots=slots,
     )
 
 
@@ -928,6 +946,7 @@ async def _probe_new_models(
     model_names: list,
     existing_limits: Dict[str, int],
     context_pressure: Optional[float] = None,
+    slots: Optional[int] = None,
 ) -> Dict[str, int]:
     """
     Probe models that are not yet in the cache or lack a performance baseline.
@@ -1051,8 +1070,8 @@ async def _probe_new_models(
             print(f"{_PFX}  Skipping {model_name} for custom model: not an eligible local model.")
             continue
         
-        # Recreate the custom model. create_custom_model applies context_pressure.
-        await create_custom_model(base_url, model_name, limit, context_pressure)
+        # Recreate the custom model. create_custom_model applies context_pressure and slots.
+        await create_custom_model(base_url, model_name, limit, context_pressure, slots)
 
     print(f"{_PFX} ----- ----- ----- ----- ----- ----- ----- ----- ----- -----")
     print(f"{_PFX} Probing complete. Summary:")

@@ -168,6 +168,7 @@ The full **status** message:
   "models": [ /* Ollama /api/tags entries, names stripped of the thinkfarm- prefix, thinkfarm- derivatives deduped, only probed + non-blacklisted */ ],
   "loaded_models": ["llama3.2", "…"],
   "context_limits": { "llama3.2": 46080, "bge-m3": -1, "…": 8192 },
+  "slots": 4,
   "is_busy": false
 }
 ```

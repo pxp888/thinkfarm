@@ -101,6 +101,7 @@ class ProviderClient:
             self.context_limits = load_limits(
                 local_ollama_url=self.config.local_ollama_url,
                 context_pressure=self.config.context_pressure,
+                slots=self.config.slots,
             )
         except Exception as e:
             self.log(f"Failed to load context limits: {e}", logging.ERROR)
@@ -239,10 +240,12 @@ class ProviderClient:
             for m in models:
                 name = m.get("name")
                 if name:
-                    # Use 90% of cached limit if available and positive, else fallback to 8192
+                    # Apply context_pressure and slot division to the cached limit
                     limit = limits.get(name)
+                    pressure = min(getattr(self.config, "context_pressure", 0.9), 1.0)
+                    max_slots = max(1, getattr(self.config, "slots", 1))
                     if limit is not None and limit > 0:
-                        context_limits[name] = int(limit * 0.9)
+                        context_limits[name] = max(1, int(limit * pressure / max_slots))
                     elif limit == -1:
                         context_limits[name] = -1
                     else:
@@ -255,7 +258,8 @@ class ProviderClient:
                 "models": models,
                 "loaded_models": loaded,
                 "context_limits": context_limits,
-                "is_busy": len(self.active_jobs) > 0
+                "slots": getattr(self.config, "slots", 1),
+                "is_busy": len(self.active_jobs) >= getattr(self.config, "slots", 1)
             }
             
             try:
@@ -310,10 +314,11 @@ class ProviderClient:
                     limits = load_context_limits(
                         local_ollama_url=self.config.local_ollama_url,
                         context_pressure=self.config.context_pressure,
+                        slots=self.config.slots,
                     )
                     await run_context_probing(
                         self.config.local_ollama_url, model_names, limits,
-                        self.config.context_pressure,
+                        self.config.context_pressure, self.config.slots,
                     )
                     self.load_context_limits()
                     self.load_performance_baselines()
@@ -471,8 +476,10 @@ class ProviderClient:
                 num_ctx = msg.get("num_ctx")
                 if num_ctx is not None and num_ctx > 0:
                     limit = self.context_limits.get(local_model_name)
+                    pressure = min(getattr(self.config, "context_pressure", 0.9), 1.0)
+                    max_slots = max(1, getattr(self.config, "slots", 1))
                     if limit is not None and limit > 0:
-                        effective_limit = int(limit * 0.9)
+                        effective_limit = max(1, int(limit * pressure / max_slots))
                     elif limit == -1:
                         effective_limit = -1
                     else:
@@ -482,8 +489,13 @@ class ProviderClient:
                             self.log(f"Ignoring job {job_id} for digest {digest} ({local_model_name}): requested num_ctx {num_ctx} exceeds limit {effective_limit}")
                             return
 
-                # Delay 1.5s if currently busy with other jobs
-                if self.current_jobs > 0:
+                max_slots = getattr(self.config, "slots", 1)
+                if len(self.active_jobs) >= max_slots:
+                    self.log(f"Ignoring job {job_id} for digest {digest} ({local_model_name}): all slots busy ({len(self.active_jobs)}/{max_slots})")
+                    return
+
+                # Delay 1.5s if at or near capacity in single-slot mode
+                if max_slots <= 1 and self.current_jobs > 0:
                     await asyncio.sleep(1.5)
                 # Delay 0.5s if the model is not already loaded
                 if local_model_name not in self.loaded_models:
@@ -719,7 +731,7 @@ class ProviderClient:
                 "prompt_eval_count": prompt_eval_count,
                 "eval_count": eval_count,
                 "total_duration": duration_ns,
-                "is_busy": len(self.active_jobs) > 1
+                "is_busy": len(self.active_jobs) >= getattr(self.config, "slots", 1)
             }
             await self.websocket.send(json.dumps(done_msg))
             

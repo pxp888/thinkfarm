@@ -20,6 +20,7 @@ class ConfigManager:
         self.provider_id: str = str(uuid.uuid4())
         self.consumer_id: str = ""
         self.port: int = 11435
+        self.slots: int = 1
 
         self.whitelist_enabled: bool = False
         self.whitelist_models: list[str] = []
@@ -94,6 +95,12 @@ class ConfigManager:
                 val = None
             return val or env_vals.get(key) or (default if default else None)
 
+        s_raw = v(self._SECTION_PROVIDER, "SLOTS", "1") or "1"
+        try:
+            self.slots = max(1, int(s_raw))
+        except ValueError:
+            self.slots = 1
+
         self.server_url = env_vals.get("CENTRAL_SERVER_URL") or "https://app.thinkfarm.net"
         self.provider_id = v(self._SECTION_PROVIDER, "PROVIDER_ID", str(uuid.uuid4())) or self.provider_id
         self.consumer_id = v(self._SECTION_CONSUMER, "CONSUMER_ID", "") or ""
@@ -140,6 +147,7 @@ class ConfigManager:
             raw.add_section(self._SECTION_CONSUMER)
 
         raw.set(self._SECTION_PROVIDER, "PROVIDER_ID", self.provider_id)
+        raw.set(self._SECTION_PROVIDER, "SLOTS", str(self.slots))
         raw.set(self._SECTION_CONSUMER, "CONSUMER_ID", self.consumer_id)
         raw.set(self._SECTION_CONSUMER, "CLIENT_PORT", str(self.port))
         raw.set(self._SECTION_CONSUMER, "WHITELIST_ENABLED", "true" if self.whitelist_enabled else "false")
