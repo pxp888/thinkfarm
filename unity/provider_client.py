@@ -489,27 +489,41 @@ class ProviderClient:
                             self.log(f"Ignoring job {job_id} for digest {digest} ({local_model_name}): requested num_ctx {num_ctx} exceeds limit {effective_limit}")
                             return
 
-                max_slots = getattr(self.config, "slots", 1)
-                if len(self.active_jobs) >= max_slots:
-                    self.log(f"Ignoring job {job_id} for digest {digest} ({local_model_name}): all slots busy ({len(self.active_jobs)}/{max_slots})")
-                    return
+                async def process_acceptance():
+                    max_slots = max(1, getattr(self.config, "slots", 1))
+                    current_active = len(self.active_jobs)
+                    
+                    delay = 0.0
+                    if current_active >= max_slots:
+                        # Fully busy -> 2s delay
+                        delay += 2.0
+                    # Partially busy -> no delay
+                        
+                    # Model unloaded -> 2s delay
+                    if local_model_name not in self.loaded_models:
+                        delay += 2.0
+                    
+                    if delay > 0:
+                        self.log(f"Delaying acceptance of job {job_id} by {delay:.1f}s (active: {current_active}/{max_slots}, loaded: {local_model_name in self.loaded_models})")
+                        await asyncio.sleep(delay)
+                        
+                    if self.soft_stopping or not self.websocket:
+                        return
+                        
+                    self.log(f"Accepting job {job_id} for digest {digest} ({local_model_name})")
+                    accept_msg = {
+                        "type": "accept",
+                        "job_id": job_id,
+                        "provider_id": self.config.provider_id
+                    }
+                    try:
+                        await self.websocket.send(json.dumps(accept_msg))
+                        # Send status showing we are busy (optimistic)
+                        await self.send_status()
+                    except Exception as e:
+                        self.log(f"Failed to send acceptance for job {job_id}: {e}", logging.WARNING)
 
-                # Delay 1.5s if at or near capacity in single-slot mode
-                if max_slots <= 1 and self.current_jobs > 0:
-                    await asyncio.sleep(1.5)
-                # Delay 0.5s if the model is not already loaded
-                if local_model_name not in self.loaded_models:
-                    await asyncio.sleep(0.5)
-                
-                self.log(f"Accepting job {job_id} for digest {digest} ({local_model_name})")
-                accept_msg = {
-                    "type": "accept",
-                    "job_id": job_id,
-                    "provider_id": self.config.provider_id
-                }
-                await self.websocket.send(json.dumps(accept_msg))
-                # Send status showing we are busy (optimistic)
-                await self.send_status()
+                asyncio.create_task(process_acceptance())
                 
         elif msg_type == "job_assigned":
             job_id = msg.get("job_id")

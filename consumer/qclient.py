@@ -210,7 +210,7 @@ class QConsumerGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Client v14")
+        self.info_label = QLabel("Client v15")
         self.info_label.setStyleSheet("color: #8e8e93; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -756,9 +756,9 @@ class QConsumerGUI(QMainWindow):
     def closeEvent(self, event):
         if self._is_quitting or not QSystemTrayIcon.isSystemTrayAvailable():
             self.stop_service()
-            event.accept()
         else:
-            event.ignore()
+            # Hide instead of closing. Ignore+hide misbehaves under macOS/
+            # PyInstaller and lets the app quit, so hide first, then accept.
             self.hide()
             if hasattr(self, "tray_icon") and self.tray_icon.isVisible():
                 self.tray_icon.showMessage(
@@ -767,6 +767,7 @@ class QConsumerGUI(QMainWindow):
                     QSystemTrayIcon.MessageIcon.Information,
                     2000
                 )
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
