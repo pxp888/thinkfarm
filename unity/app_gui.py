@@ -145,6 +145,7 @@ class ProviderThread(threading.Thread):
 
 class ThinkfarmApp(QMainWindow):
     models_loaded = pyqtSignal(list)
+    provider_models_loaded = pyqtSignal(list)
 
     def _get_free_port(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -250,6 +251,7 @@ class ThinkfarmApp(QMainWindow):
                             if resp.status_code == 200:
                                 logging.getLogger("thinkfarm").info("Child Ollama is ready! Refreshing models...")
                                 QTimer.singleShot(0, self.refresh_models)
+                                QTimer.singleShot(0, self.refresh_provider_models)
                                 return
                     except Exception:
                         pass
@@ -285,12 +287,15 @@ class ThinkfarmApp(QMainWindow):
         logging.getLogger("httpx").setLevel(logging.WARNING)
         
         self.model_vars = {}
+        self.provider_model_vars = {}
         self.models_loaded.connect(self._populate_models)
+        self.provider_models_loaded.connect(self._populate_provider_models)
         
         self.init_ui()
         self.init_tray()
         
         QTimer.singleShot(100, self.refresh_models)
+        QTimer.singleShot(100, self.refresh_provider_models)
 
     def init_tray(self):
         # Create tray icon
@@ -357,7 +362,7 @@ class ThinkfarmApp(QMainWindow):
         QApplication.quit()
 
     def init_ui(self):
-        self.setWindowTitle("thinkfarm v16")
+        self.setWindowTitle("thinkfarm v18")
         self.resize(1400, 750)
         
         # Stylesheet to match qclient theme
@@ -652,13 +657,104 @@ class ThinkfarmApp(QMainWindow):
         self.provider_form.addRow("Ollama Restart Command:", self.restart_cmd_input)
         self.provider_form.addRow("Context Pressure:", pressure_layout)
 
+        self.provider_whitelist_enabled_cb = QCheckBox("Enable Model Whitelist")
+        self.provider_whitelist_enabled_cb.setChecked(self.config_manager.provider_whitelist_enabled)
+        self.provider_form.addRow("", self.provider_whitelist_enabled_cb)
+
         self.toggle_managed_ollama_fields()
+
+        self._provider_content_layout.addLayout(self.provider_form)
+
+        # Provider Whitelist Section Header
+        provider_wl_header_layout = QHBoxLayout()
+        self.provider_wl_title = QLabel("Model Whitelist")
+        self.provider_wl_title.setStyleSheet("font-weight: bold; color: #548889;")
+        provider_wl_header_layout.addWidget(self.provider_wl_title)
+        provider_wl_header_layout.addStretch()
+
+        self.provider_refresh_btn = QPushButton("Refresh Models")
+        self.provider_refresh_btn.setFixedSize(120, 28)
+        self.provider_refresh_btn.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid rgba(0, 0, 0, 0.1);
+                border-radius: 0px;
+                font-size: 11px;
+                font-weight: 500;
+                color: #8e8e93;
+            }
+            QPushButton:hover {
+                background-color: rgba(84, 136, 137, 0.08);
+                color: #548889;
+            }
+        """)
+        self.provider_refresh_btn.clicked.connect(self.refresh_provider_models)
+        provider_wl_header_layout.addWidget(self.provider_refresh_btn)
+        self._provider_content_layout.addLayout(provider_wl_header_layout)
+
+        # Provider Filter
+        provider_filter_layout = QHBoxLayout()
+        self.provider_filter_icon = QLabel("🔍")
+        self.provider_filter_icon.setStyleSheet("border: none; color: rgba(0, 0, 0, 0.4);")
+        provider_filter_layout.addWidget(self.provider_filter_icon)
+
+        self.provider_filter_entry = QLineEdit()
+        self.provider_filter_entry.setPlaceholderText("Filter models...")
+        self.provider_filter_entry.setStyleSheet("""
+            QLineEdit {
+                background-color: #f5f5f7;
+                border: 1px solid transparent;
+                border-radius: 0px;
+                height: 32px;
+                padding: 6px 10px;
+            }
+        """)
+        self.provider_filter_entry.textChanged.connect(self.apply_provider_model_filter)
+        provider_filter_layout.addWidget(self.provider_filter_entry)
+        self._provider_content_layout.addLayout(provider_filter_layout)
+
+        # Provider Select All/None
+        provider_toggle_layout = QHBoxLayout()
+        provider_toggle_layout.addStretch()
+
+        self.provider_select_none_btn = QPushButton("None")
+        self.provider_select_all_btn = QPushButton("All")
+        for btn in [self.provider_select_none_btn, self.provider_select_all_btn]:
+            btn.setFixedSize(60, 28)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    border: 1px solid rgba(0, 0, 0, 0.1);
+                    border-radius: 0px;
+                    font-size: 11px;
+                    font-weight: 500;
+                    color: #8e8e93;
+                }
+                QPushButton:hover {
+                    background-color: rgba(84, 136, 137, 0.08);
+                    color: #548889;
+                }
+            """)
+        self.provider_select_all_btn.clicked.connect(self.select_all_provider_models)
+        self.provider_select_none_btn.clicked.connect(self.select_none_provider_models)
+        provider_toggle_layout.addWidget(self.provider_select_none_btn)
+        provider_toggle_layout.addWidget(self.provider_select_all_btn)
+        self._provider_content_layout.addLayout(provider_toggle_layout)
+
+        # Provider Scroll Area for Models
+        self.provider_scroll_area = QScrollArea()
+        self.provider_scroll_area.setWidgetResizable(True)
+        self.provider_scroll_area.setFixedHeight(200)
+        self.provider_models_widget = QWidget()
+        self.provider_models_widget.setStyleSheet("background-color: #ececec;")
+        self.provider_models_layout = QVBoxLayout(self.provider_models_widget)
+        self.provider_models_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.provider_scroll_area.setWidget(self.provider_models_widget)
+        self._provider_content_layout.addWidget(self.provider_scroll_area)
 
         provider_save_btn = QPushButton("Save Configuration")
         provider_save_btn.clicked.connect(self.save_config)
-        self.provider_form.addRow("", provider_save_btn)
-
-        self._provider_content_layout.addLayout(self.provider_form)
+        self._provider_content_layout.addWidget(provider_save_btn)
         
         self.provider_toggle_btn = QPushButton("Start Provider")
         self.provider_toggle_btn.setObjectName("actionButton")
@@ -718,6 +814,13 @@ class ThinkfarmApp(QMainWindow):
                 selected.append(m)
         self.config_manager.whitelist_models = selected
         
+        self.config_manager.provider_whitelist_enabled = self.provider_whitelist_enabled_cb.isChecked()
+        selected_provider = [name for name, cb in self.provider_model_vars.items() if cb.isChecked()]
+        for m in self.config_manager.provider_whitelist_models:
+            if m not in self.provider_model_vars and m not in selected_provider:
+                selected_provider.append(m)
+        self.config_manager.provider_whitelist_models = selected_provider
+
         self.config_manager.ollama_models_path = self.models_path_input.text()
 
         if is_managed:
@@ -738,6 +841,8 @@ class ThinkfarmApp(QMainWindow):
         
         self.config_manager.save()
         logging.getLogger("thinkfarm").info("Configuration saved successfully.")
+        if hasattr(self, "provider_thread") and self.provider_thread and self.provider_thread.loop and self.provider_thread.is_alive():
+            asyncio.run_coroutine_threadsafe(self.provider_thread.provider_client.send_status(force_full=True), self.provider_thread.loop)
 
     def toggle_managed_ollama_fields(self):
         is_managed = self.config_manager.managed_ollama
@@ -837,6 +942,69 @@ class ThinkfarmApp(QMainWindow):
 
     def select_none_models(self):
         for cb in self.model_vars.values():
+            cb.setChecked(False)
+
+    def refresh_provider_models(self):
+        """Fetch available models from the local Ollama instance in a background thread."""
+        local_url = self.local_ollama_input.text().strip().rstrip('/') or self.config_manager.local_ollama_url.strip().rstrip('/')
+        def _fetch():
+            try:
+                response = requests.get(f"{local_url}/api/tags", timeout=5)
+                if response.status_code == 200:
+                    models = response.json().get("models", [])
+                    self.provider_models_loaded.emit(models)
+            except Exception as e:
+                logging.getLogger("thinkfarm").debug(f"Failed to fetch models from local Ollama: {e}")
+        
+        threading.Thread(target=_fetch, daemon=True).start()
+
+    def _populate_provider_models(self, models):
+        """Populate the provider whitelist with models fetched from local Ollama."""
+        previous_model_vars = self.provider_model_vars
+        current_checked = {name for name, cb in previous_model_vars.items() if cb.isChecked()}
+
+        # Clear existing checkboxes
+        while self.provider_models_layout.count():
+            item = self.provider_models_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+        self.provider_model_vars = {}
+        filter_text = self.provider_filter_entry.text().lower().strip()
+
+        for m in models:
+            name = m.get("name") if isinstance(m, dict) else m
+            if name.lower().startswith("thinkfarm"):
+                continue
+
+            cb = QCheckBox(name)
+            cb.setStyleSheet("margin: 5px; border: none; color: #1c1c1e; font-size: 13px;")
+            self.provider_model_vars[name] = cb
+
+            if name in self.config_manager.provider_whitelist_models:
+                if name in previous_model_vars and name not in current_checked:
+                    cb.setChecked(False)
+                else:
+                    cb.setChecked(True)
+            elif name in current_checked:
+                cb.setChecked(True)
+
+            cb.setVisible(not filter_text or filter_text in name.lower())
+            self.provider_models_layout.addWidget(cb)
+
+    def apply_provider_model_filter(self):
+        """Filter the visible provider models in the list based on current filter text."""
+        filter_text = self.provider_filter_entry.text().lower().strip()
+        for name, cb in self.provider_model_vars.items():
+            cb.setVisible(not filter_text or filter_text in name.lower())
+
+    def select_all_provider_models(self):
+        for cb in self.provider_model_vars.values():
+            cb.setChecked(True)
+
+    def select_none_provider_models(self):
+        for cb in self.provider_model_vars.values():
             cb.setChecked(False)
 
     def append_log(self, message, level):

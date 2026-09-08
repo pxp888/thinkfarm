@@ -68,11 +68,12 @@ class OllamaClient:
             yield {"error": str(e)}
 
 class ProviderClient:
-    def __init__(self, config: ConfigManager, status_callback=None, log_callback=None, restart_callback=None):
+    def __init__(self, config: ConfigManager, status_callback=None, log_callback=None, restart_callback=None, reconnect_delay: float = 5.0):
         self.config = config
         self.status_callback = status_callback  # Callback for connection/status updates
         self.log_callback = log_callback        # Callback for provider logs
         self.restart_callback = restart_callback
+        self.reconnect_delay = reconnect_delay
         self.running = False
         self.soft_stopping = False
         self.websocket = None
@@ -138,6 +139,27 @@ class ProviderClient:
         except Exception as e:
             self.log(f"Failed to save blacklist: {e}", logging.ERROR)
 
+    def is_model_whitelisted(self, model_name: str) -> bool:
+        if not getattr(self.config, "provider_whitelist_enabled", False):
+            return True
+
+        whitelist = getattr(self.config, "provider_whitelist_models", [])
+        if not whitelist:
+            return True
+
+        if model_name in whitelist:
+            return True
+
+        base_name = model_name.split(":")[0]
+        if base_name in whitelist:
+            return True
+        if f"{model_name}:latest" in whitelist:
+            return True
+        if model_name.endswith(":latest") and model_name[:-7] in whitelist:
+            return True
+
+        return False
+
     async def get_performance_data(self):
         try:
             async with httpx.AsyncClient() as client:
@@ -193,7 +215,7 @@ class ProviderClient:
                 # For generative models (limit > 0), ensure custom thinkfarm- model variant exists in Ollama
                 if limit > 0 and f"thinkfarm-{logical_name}" not in raw_thinkfarm_names:
                     continue
-            if logical_name not in self.blacklisted_models and logical_name not in seen_names:
+            if self.is_model_whitelisted(logical_name) and logical_name not in self.blacklisted_models and logical_name not in seen_names:
                 # Overwrite the digest with the original model's digest (not the thinkfarm- variant's)
                 original = original_by_name.get(logical_name)
                 if original and original.get("digest"):
@@ -333,6 +355,7 @@ class ProviderClient:
                 self.startup_model_loaded = True
                 asyncio.create_task(self.load_most_desirable_model())
 
+            conn_error = None
             try:
                 ws_scheme = "wss" if self.config.server_url.startswith("https") else "ws"
                 host = self.config.server_url.split("://")[-1]
@@ -370,28 +393,34 @@ class ProviderClient:
                             await self.handle_message(data)
                     finally:
                         heartbeat_task.cancel()
-                        
             except Exception as e:
+                conn_error = e
+            finally:
                 self.websocket = None
-                if self.status_callback:
-                    if getattr(self, "restarting_ollama", False):
-                        pass # status is set by restart_ollama
-                    else:
-                        self.status_callback("Disconnected")
-                if self.running and not self.soft_stopping:
-                    if getattr(self, "probing_triggered", False):
-                        self.probing_triggered = False
-                    elif getattr(self, "restarting_ollama", False):
-                        await asyncio.sleep(2)
-                    else:
-                        self.log(f"WebSocket connection error: {e}. Reconnecting in 5 seconds...", logging.ERROR)
-                        await asyncio.sleep(5)
+
+            if self.status_callback:
+                if getattr(self, "restarting_ollama", False):
+                    pass # status is set by restart_ollama
                 else:
-                    if not getattr(self, "probing_triggered", False) and not getattr(self, "restarting_ollama", False):
-                        self.running = False
-                        self.log("Provider connection stopped.")
+                    self.status_callback("Disconnected")
+
+            if self.running and not self.soft_stopping:
+                if getattr(self, "probing_triggered", False):
+                    self.probing_triggered = False
+                elif getattr(self, "restarting_ollama", False):
+                    await asyncio.sleep(2)
+                else:
+                    if conn_error:
+                        self.log(f"WebSocket connection error: {conn_error}. Reconnecting in {self.reconnect_delay:.0f} seconds...", logging.ERROR)
                     else:
-                        self.probing_triggered = False
+                        self.log(f"WebSocket connection closed. Reconnecting in {self.reconnect_delay:.0f} seconds...", logging.INFO)
+                    await asyncio.sleep(self.reconnect_delay)
+            else:
+                if not getattr(self, "probing_triggered", False) and not getattr(self, "restarting_ollama", False):
+                    self.running = False
+                    self.log("Provider connection stopped.")
+                else:
+                    self.probing_triggered = False
         
         self.websocket = None
         if self.status_callback:
@@ -430,7 +459,7 @@ class ProviderClient:
             for m in model_names:
                 if m.startswith("thinkfarm-") or m.endswith(":cloud"):
                     continue
-                if m not in limits or limits[m] == 0:
+                if m not in limits:
                     return True
                 if limits[m] > 0 and m not in baselines:
                     return True

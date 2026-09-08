@@ -962,7 +962,7 @@ async def _probe_new_models(
     for m in model_names:
         if m.startswith("thinkfarm-") or m.endswith(":cloud"):
             continue
-        if m not in limits or limits[m] == 0:
+        if m not in limits:
             to_probe.append(m)
         elif limits[m] > 0 and m not in baselines:
             to_probe.append(m)

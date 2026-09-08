@@ -24,6 +24,8 @@ class ConfigManager:
 
         self.whitelist_enabled: bool = False
         self.whitelist_models: list[str] = []
+        self.provider_whitelist_enabled: bool = False
+        self.provider_whitelist_models: list[str] = []
         self.local_ollama_url: str = "http://localhost:11434"
         self.auto_manage_models: bool = False
         self.gb_allowed: float = 0.0
@@ -119,6 +121,9 @@ class ConfigManager:
         wl_en = v(self._SECTION_CONSUMER, "WHITELIST_ENABLED", "false") or "false"
         self.whitelist_enabled = wl_en.lower() == "true"
 
+        pwl_en = v(self._SECTION_PROVIDER, "WHITELIST_ENABLED", "false") or env_vals.get("PROVIDER_WHITELIST_ENABLED") or "false"
+        self.provider_whitelist_enabled = pwl_en.lower() == "true"
+
         am = v(self._SECTION_PROVIDER, "AUTO_MANAGE_MODELS", "false") or "false"
         self.auto_manage_models = am.lower() == "true"
 
@@ -134,6 +139,9 @@ class ConfigManager:
         wl_raw = raw.get(self._SECTION_CONSUMER, "WHITELIST_MODELS", fallback=None) or env_vals.get("WHITELIST_MODELS") or ""
         self.whitelist_models = [m.strip() for m in wl_raw.split(",") if m.strip()]
 
+        pwl_raw = raw.get(self._SECTION_PROVIDER, "WHITELIST_MODELS", fallback=None) or env_vals.get("PROVIDER_WHITELIST_MODELS") or ""
+        self.provider_whitelist_models = [m.strip() for m in pwl_raw.split(",") if m.strip()]
+
     def save(self):
         raw = ConfigParser()
         raw.read(self.config_path, encoding="utf-8")
@@ -148,6 +156,8 @@ class ConfigManager:
 
         raw.set(self._SECTION_PROVIDER, "PROVIDER_ID", self.provider_id)
         raw.set(self._SECTION_PROVIDER, "SLOTS", str(self.slots))
+        raw.set(self._SECTION_PROVIDER, "WHITELIST_ENABLED", "true" if self.provider_whitelist_enabled else "false")
+        raw.set(self._SECTION_PROVIDER, "WHITELIST_MODELS", ",".join(self.provider_whitelist_models))
         raw.set(self._SECTION_CONSUMER, "CONSUMER_ID", self.consumer_id)
         raw.set(self._SECTION_CONSUMER, "CLIENT_PORT", str(self.port))
         raw.set(self._SECTION_CONSUMER, "WHITELIST_ENABLED", "true" if self.whitelist_enabled else "false")
