@@ -26,7 +26,7 @@ maximize demand coverage within a storage budget.
 | File | Role |
 |---|---|
 | `main.py` | Entry point. Creates the Qt application and the `ThinkfarmApp` window. `multiprocessing.freeze_support()` for PyInstaller. |
-| `app_gui.py` | PyQt6 GUI (`ThinkfarmApp`): dashboard, config panels, model whitelist, log pane, tray icon. Hosts the two worker threads (`ClientThread`, `ProviderThread`). On Windows it also *manages* Ollama as a child subprocess on a random free port. |
+| `app_gui.py` | PyQt6 GUI (`ThinkfarmApp`): dashboard, config panels, consumer *and* provider model whitelists, log pane, tray icon (minimizes to tray instead of closing). Hosts the two worker threads (`ClientThread`, `ProviderThread`). On Windows it also *manages* Ollama as a child subprocess on a random free port. On startup it compares `PROVIDER_VERSION` against `https://thinkfarm.eu/api/version` and pops a modal update dialog (with download link) if a newer version exists. |
 | `client_server.py` | The Consumer side: a FastAPI app (`create_client_app`) exposing an Ollama-compatible API and proxying everything to the central server with an `X-Consumer-ID` header. |
 | `provider_client.py` | The Provider side: `ProviderClient` (WebSocket job engine) and `OllamaClient` (HTTP helper wrappers for the local Ollama server). |
 | `context_prober.py` | Discovery of the max GPU-safe context per model (binary search over `num_ctx`), performance baselining, and creation of `thinkfarm-` shadow models. |
@@ -41,10 +41,10 @@ maximize demand coverage within a storage budget.
 | `config.ini` | `config.py` | `[provider]` and `[consumer]` sections (IDs, URLs, whitelist, budget, context pressure, …). |
 | `gpu_context_limits.json` | `context_prober.py` | `model_name -> max GPU-safe num_ctx` (`-1` = embedding model, `0` = no GPU / failed). |
 | `performance_baselines.json` | `context_prober.py` | `model_name -> {slope, samples, last_probed}` baseline throughput in tokens/s. |
-| `blacklisted_models.json` | `provider_client.py` | Models permanently excluded from the advertised set (e.g. failed sanity checks). |
+| `blacklisted_models.json` | `provider_client.py` | Models permanently excluded from the advertised set (added only by the slow-jobs / slope-monitor routine — sanity-check failures trigger an Ollama *restart*, not blacklisting). |
 | `managed_models_names.json` | `model_manager.py` | Names of models this node itself pulled (managed set). |
 | `user_models.json` | `model_manager.py` | Accumulated set of user-owned models (never deleted by the manager). |
-| `_slopemon.json` | *(server-side/shared data, read if present)* | Network peak performance per model, used for slow-job thresholds. |
+| `_slopemon.json` | *(network data, read if present)* | Network peak performance per model. Only read by `model_manager.py` (used to log `peak/3` peer thresholds during suitability checks — not as a hard filter). The provider's slow-job monitor instead uses `GET {server_url}/api/performance`. |
 | `ollama_internal.log` | `app_gui.py` | Logs of the Windows-managed child Ollama process. |
 
 ---
@@ -90,7 +90,7 @@ mimics the Ollama API surface so standard clients work unmodified:
 | `POST /api/embeddings`, `POST /api/embed` | same | **`num_ctx` injection** |
 | `POST /api/show` | `POST /api/show` | none |
 | `POST /v1/chat/completions`, `/v1/completions`, `/v1/responses` | same | none |
-| `GET  /`, `/version`, `/api/version` | local responses | — |
+| `GET  /`, `/version`, `/api/version` | local responses (`/version` returns the hardcoded proxy version) | — |
 
 Transformation rules:
 
@@ -139,7 +139,8 @@ App (base URL :11435) → proxy → central server → (routing) → provider We
    (`context_prober.run_context_probing`), then continues.
 3. On first startup with no model loaded, fires `load_most_desirable_model()`
    (loads the highest-revenue/least-competition model it hosts, using the central
-   `/api/demandchart`).
+   `/api/demandchart`; if none of its local models appears in the demand chart it
+   falls back to the alphabetically first local probed model).
 4. Connects the WebSocket:
    `wss://<host>/ws/provider/<provider_id>` (`ws` for http servers), with
    `ping_interval=20`, `ping_timeout=20`.
@@ -165,7 +166,7 @@ The full **status** message:
   "type": "status",
   "provider_id": "<uuid>",
   "connected_at": "2025-01-01T00:00:00Z",
-  "models": [ /* Ollama /api/tags entries, names stripped of the thinkfarm- prefix, thinkfarm- derivatives deduped, only probed + non-blacklisted */ ],
+  "models": [ /* Ollama /api/tags entries, names stripped of the thinkfarm- prefix, thinkfarm- derivatives deduped, only probed + non-blacklisted + provider-whitelisted (if enabled); generative models (limit > 0) are only advertised if the locally-created thinkfarm-<name> shadow model actually exists in Ollama; digest is overwritten with the ORIGINAL (non-thinkfarm-) model's digest so all providers advertise a consistent upstream digest */ ],
   "loaded_models": ["llama3.2", "…"],
   "context_limits": { "llama3.2": 46080, "bge-m3": -1, "…": 8192 },
   "slots": 4,
@@ -173,16 +174,20 @@ The full **status** message:
 }
 ```
 
-`context_limits` semantics: `limit > 0` → advertised as `int(limit * 0.9)` (the
-`context_pressure` safe fraction, i.e. 90 % of the probed max); `limit == -1` →
-embedding / unlimited; otherwise fallback `8192`.
+`context_limits` semantics: `limit > 0` → advertised as `int(limit * context_pressure / slots)`
+(the `context_pressure` safe fraction — 0.9 by default — further divided across
+`slots`); `limit == -1` → embedding / unlimited; otherwise fallback `8192`.
+
+`is_busy` is `active_jobs >= slots` — so `slots` (a `[provider]` config value,
+default `1`) is the node's self-declared parallelism: it scales the advertised
+context limits down and defines when the node reports itself busy.
 
 ### 4.2 Server → provider messages
 
 | Type | Meaning | Provider behavior |
 |---|---|---|
-| `job_published` | *Advertisement*: this job **may** be handled here | Validate model locally + context limit; optionally delay 1.5 s if busy / 0.5 s if model not loaded; then send `accept` and optimistic `status(is_busy=true)`. Jobs for models we don't have are silently ignored (the server will route to someone else). |
-| `job_assigned` | The server committed the job to us after our `accept` | Increment job counters, pre-load the model with an empty keep-alive call, run `execute_job` as a background task, send `status`. |
+| `job_published` | *Advertisement*: this job **may** be handled here | Match the published **`digest`** against the local probed set (matching is by digest, not model name) + validate the requested `num_ctx` against the effective limit. If fully busy (active jobs ≥ `slots`) add a 2 s delay; if the model isn't loaded add another 2 s (delays are additive, up to 4 s). Then send `accept` and a non-forced `send_status()` — which is a full `status` only if the model set changed or ≥ 20 min elapsed, otherwise just a `ping`. Ads whose digest doesn't match a local probed model are silently ignored (the server will route to someone else). |
+| `job_assigned` | The server committed the job to us after our `accept` | Resolve the local model by **`digest`** (same matching as `job_published`; falls back to the requested name if no match), increment job counters, pre-load the model with an empty keep-alive call, run `execute_job` as a background task, send `status`. |
 | `cancel_job` | Abort the job | `task.cancel()` the Ollama request; counters reset in `finally`. |
 | `error` | Server-side error | Logged only. |
 | (text / binary WS frames from Ollama) | — | All job I/O goes out as JSON envelopes above. |
@@ -197,13 +202,17 @@ tells the winning provider to execute exactly once.
   `/api/…`; `v1/chat/completions`, `v1/completions`, `v1/responses` → `/v1/…`.
 - **Model aliasing**: for non-embedding endpoints the base model is internally
   mapped to its shadow variant `thinkfarm-<model>` (which has the correct
-  `num_ctx` baked in via `num_ctx_train`), the Ollama response stream is scanned
-  for the alias and rewritten back to the base model name, and non-stream JSON has
-  its `model` field restored. Embedding endpoints use the plain model (probed
-  shadow models still exist but are bypassed since embeddings don't need context).
-- Forcing: `stream_options.include_usage = true` on all streams (so token counts
-  are available), `keep_alive: -1` on every request (models stay resident in VRAM
-  forever).
+  `num_ctx` baked in at creation via `/api/create` with `parameters: {num_ctx}`).
+  The local name is resolved primarily from the server-supplied **`digest`**.
+  The response stream is rewritten back to the requested model name with a regex
+  scoped to the `"model"` field only (so names that are substrings of others,
+  or model names inside response *content*, are left untouched), and non-stream
+  JSON has its `model` field restored. Embedding endpoints use the plain model
+  (probed shadow models still exist but are bypassed since embeddings don't need
+  context).
+- Forcing: `stream_options.include_usage = true` on all streams when not already
+  set by the caller (so token counts are available), `keep_alive: -1` on every
+  request (models stay resident in VRAM forever).
 - Streaming path: `aiter_bytes()` relayed into a buffer; complete frames are parsed
   *only* to extract `eval_count` / `eval_duration` / usage stats; every 75 ms (or
   at end-of-stream) the accumulated raw text is flushed as one `chunk` message.
@@ -247,7 +256,9 @@ After each non-embedding job:
      `Error: Test prompt failed`, `performance_degraded`).
 2. **Slope monitor** — keep the last 5 `(tokens/s, duration)` samples per model.
    If 3 consecutive jobs ≥ 10 s are all below `peak/3` (the "slopemon" global,
-   from `https://www.thinkfarm.net/api/performance` or `_slopemon.json`):
+   from `GET {server_url}/api/performance`, fetched once when the provider
+   starts — there is no local `_slopemon.json` fallback, and the model must
+   appear in that data for the check to run):
    - measured ≥ 70 % baseline → **blacklist** the model locally
      (`blacklisted_models.json`), unload it, re-announce, resume.
    - measured < 70 % baseline → treat as hardware issue → `restart_ollama()`.
@@ -269,8 +280,10 @@ Algorithm (per model, in `_find_max_gpu_ctx`):
      there is no KV-cache OOM risk).
    - `is_eligible` is false for cloud models, `:cloud` tags, and `thinkfarm-*`
      derivatives (those become `limits[model] = 0`, announced as unavailable).
-   - `upper_bound` = the largest `*.context_length` / `num_ctx_train` / Modelfile
-     `num_ctx` found in `model_info`, else `262 144`. On NVIDIA an *analytical*
+   - `upper_bound` = the `<arch>.context_length` (or any `*.context_length`)
+     key found in `model_info`; only if none is present is the Modelfile
+     `num_ctx` parameter consulted; else `262 144`. (Note: `num_ctx_train` is
+     never actually read by the prober code.) On NVIDIA an *analytical*
      KV cap is also computed: `(VRAM − 1.5 GiB − weights) / (2·l·h_kv·d·2 bytes)`.
 2. **Binary search** `num_ctx` in `[512, upper_bound]`, `≤ 10` iterations,
    probing with a tiny prompt (`"Hi"`, `num_predict: 1`) through `/api/generate`
@@ -296,12 +309,14 @@ At the end (and on every load of the cache via `load_context_limits`),
 ```json
 { "model": "thinkfarm-llama3.2",
   "from": "llama3.2",
-  "parameters": { "num_ctx": "<limit * context_pressure>" },
+  "parameters": { "num_ctx": "<int(limit * context_pressure / slots)>" },
   "stream": false }
 ```
 
-`context_pressure` (default 0.9, GUI slider, `[provider] context_pressure` in
-`config.ini`) is the safe operating fraction of the discovered max. Orphaned
+`context_pressure` (default 0.9, GUI slider, `[provider] CONTEXT_PRESSURE` in
+`config.ini`) is the safe operating fraction of the discovered max, and the
+result is further divided by `slots` so concurrent jobs each get their own KV
+slice. Orphaned
 `thinkfarm-` models whose base model was deleted are cleaned up via
 `/api/delete`.
 
@@ -358,11 +373,23 @@ Pipeline of `optimize_portfolio(limit_gb)`:
 - Local `.env` overlay for `CENTRAL_SERVER_URL`, `CONSUMER_ID`, `CLIENT_PORT`,
   `WHITELIST_*`.
 - Defaults: `server_url = https://app.thinkfarm.net`, `provider_id = <uuid4>`,
-  `port = 11435`, `local_ollama_url = http://localhost:11434`,
-  `context_pressure = 0.9`, `whitelist_enabled = false`.
+  `port = 11435`, `local_ollama_url = http://localhost:11434`, `slots = 1`,
+  `context_pressure = 0.9`, `whitelist_enabled = false`,
+  `auto_manage_models = false`, `gb_allowed = 0`.
 - `provider_id` is the node's stable identity (used in the WebSocket URL and
   every `status`/`accept`/`job_done` envelope); `consumer_id` is only required
   for the consumer proxy path.
+- There are *two independent whitelists*: the **consumer** whitelist
+  (`[consumer]`), which the proxy uses to filter upstream responses for the
+  local user, and the **provider** whitelist (`[provider] WHITELIST_ENABLED` /
+  `WHITELIST_MODELS`), which filters which local models the node *advertises* to
+  the central server (a model matches if its full name, base name, or `:latest`
+  form is listed). An empty provider whitelist admits everything.
+- `slots` (default 1) is the node's parallelism: advertised `context_limits` and
+  shadow-model `num_ctx` are divided by it, and `is_busy` means active jobs ≥
+  `slots` (see §4.1).
+- `model_manager.py` also reads an optional `[provider] min_acceptable_tps`
+  (default 15.0) for its suitability logging.
 
 ## 8. End-to-end request walkthrough (consumer → provider)
 
@@ -373,15 +400,20 @@ Pipeline of `optimize_portfolio(limit_gb)`:
     https://app.thinkfarm.net/api/chat, relays bytes back as NDJSON.
 3.  Central server picks a provider hosting "llama3.x" (based on last status push)
     and pushes over wss://…/ws/provider/<id>:
-        {type:"job_published", job_id, model, num_ctx?, body:{model,prompt,stream,…"options":{num_ctx}}}
-4.  provider_client.handle_message: confirms "llama3.x" ∈ local probed set, not
-    blacklisted, and num_ctx ≤ advertised 90 % limit. Sends {type:"accept"}.
-5.  Server: {type:"job_assigned", job_id, endpoint:"chat", body:{…}}
+        {type:"job_published", job_id, digest, model, num_ctx?, body:{model,prompt,stream,…"options":{num_ctx}}}
+4.  provider_client.handle_message: matches the published digest against its local probed
+    set (the advertised digests were rewritten to the original model's digest by the
+    provider), checks provider whitelist + blacklist, and confirms num_ctx ≤ advertised
+    int(limit · 0.9 / slots). After the optional +2 s busy / +2 s unloaded delay, sends
+    {type:"accept"} (followed by a send_status() that is often just a ping unless the
+    model set changed).
+5.  Server: {type:"job_assigned", job_id, digest, endpoint:"chat", body:{…}}
 6.  execute_job: rewrites body.model → "thinkfarm-llama3.x", sets keep_alive=-1
     and include_usage, POST streams to http://127.0.0.1:<ollama_port>/api/chat.
 7.  Ollama NDJSON chunks accumulate; every ~75 ms a chunk envelope is sent:
         {type:"chunk", job_id, data:"<raw ndjson lines>"}
-    (thinkingfarm- name string-replaced back to llama3.x on the fly)
+    (the "model" field is rewritten back to llama3.x via a regex scoped to that
+     field only, so substrings and model names inside content are untouched)
 8.  Ollama finishes; final chunk flushed; then
         {type:"job_done", job_id, eval_count, prompt_eval_count, total_duration, is_busy}
     counters reset, forced full status push, performance monitors run.

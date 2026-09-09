@@ -76,6 +76,7 @@ class ProviderClient:
         self.reconnect_delay = reconnect_delay
         self.running = False
         self.soft_stopping = False
+        self.stop_requested = False  # User-initiated stop (GUI). Temporary soft stops (probing, slow-jobs) must NOT set this.
         self.websocket = None
         self.current_jobs = 0  # Accepted jobs currently being processed
         self.active_jobs = {}           # Active Ollama execution tasks
@@ -301,6 +302,7 @@ class ProviderClient:
     async def run(self):
         self.running = True
         self.soft_stopping = False
+        self.stop_requested = False
         self.probing_triggered = False
         self.log(f"Starting Provider Client ({self.config.provider_id})...")
         await self.get_performance_data()
@@ -404,7 +406,7 @@ class ProviderClient:
                 else:
                     self.status_callback("Disconnected")
 
-            if self.running and not self.soft_stopping:
+            if self.running:
                 if getattr(self, "probing_triggered", False):
                     self.probing_triggered = False
                 elif getattr(self, "restarting_ollama", False):
@@ -416,6 +418,7 @@ class ProviderClient:
                         self.log(f"WebSocket connection closed. Reconnecting in {self.reconnect_delay:.0f} seconds...", logging.INFO)
                     await asyncio.sleep(self.reconnect_delay)
             else:
+                self.log(f"Not reconnecting (running={self.running}, soft_stopping={self.soft_stopping}, stop_requested={self.stop_requested}).")
                 if not getattr(self, "probing_triggered", False) and not getattr(self, "restarting_ollama", False):
                     self.running = False
                     self.log("Provider connection stopped.")
@@ -437,6 +440,7 @@ class ProviderClient:
     async def soft_stop(self):
         self.log("Initiating soft stop...")
         self.soft_stopping = True
+        self.stop_requested = True
         if self.status_callback:
             self.status_callback("Stopping")
         if self.current_jobs == 0:
@@ -800,19 +804,27 @@ class ProviderClient:
                 if self.websocket:
                     await self.websocket.close()
 
-            if self.soft_stopping and self.current_jobs == 0:
+            if self.soft_stopping and self.current_jobs == 0 and self.stop_requested:
                 self.log("All jobs completed during soft stop. Closing websocket and stopping provider.")
                 self.running = False
                 if self.websocket:
                     await self.websocket.close()
+            elif self.soft_stopping and self.current_jobs == 0:
+                # Temporary soft stop (probing / slow-jobs routine): the loop is
+                # expected to pick this up and reconnect, so do NOT kill `running` here.
+                self.log("Drained jobs during soft stop. Leaving reconnection to the run loop.")
 
     async def monitor_performance(self, model: str, eval_count: int, duration_ns: int, endpoint: str, has_output: bool):
-        # Skip performance/zero-eval monitoring for embedding endpoints
-        if endpoint in ("embed", "embeddings"):
+        # Skip performance/zero-eval monitoring for non-generative endpoints
+        # (embeddings, /api/show metadata calls). Zero tokens is normal for those.
+        if endpoint in ("embed", "embeddings", "show"):
             return
 
         # 1. Zero-Evaluation Detection
         if eval_count == 0 and not has_output:
+            if not model:
+                self.log("Zero evaluation detected but no model name resolvable. Skipping sanity check (no model configured to test).", logging.WARNING)
+                return
             self.log(f"Zero evaluation detected for model {model}. Running sanity check test...")
             sanity_success = await self.run_sanity_check(model)
             if not sanity_success:
@@ -1144,14 +1156,20 @@ class ProviderClient:
         else:
             self.log(f"No baseline performance recorded for {priority_model}.", logging.WARNING)
             
-        # Map to thinkfarm prefix if exists
+        # Map to thinkfarm prefix if exists. NOTE: must check the RAW /api/tags
+        # names — get_local_models() strips the "thinkfarm-" prefix, so the custom
+        # model would never be found there and the test would silently run the
+        # plain model against the custom model's baseline.
         custom_model_name = f"thinkfarm-{priority_model}"
         model_to_test = priority_model
         try:
-            local_models = await self.get_local_models()
-            local_names = {m.get("name") for m in local_models if m.get("name")}
-            if custom_model_name in local_names:
-                model_to_test = custom_model_name
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{self.config.local_ollama_url.rstrip('/')}/api/tags")
+                if resp.status_code == 200:
+                    raw_names = [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
+                    if custom_model_name in raw_names:
+                        model_to_test = custom_model_name
+                        self.log(f"Mapping restart test model to custom name: {model_to_test}")
         except Exception:
             pass
             
@@ -1249,7 +1267,12 @@ class ProviderClient:
                 self.soft_stopping = False
             else:
                 self.log(f"Slow jobs performance ({slow_jobs_tps:.2f} t/s) is worse than baseline ({baseline_slope:.2f} t/s). Hardware issue likely, initiating restart...", logging.ERROR)
-                await self.restart_ollama()
+                restart_result = await self.restart_ollama()
+                if restart_result == "online":
+                    # Restart succeeded: let the run loop reconnect and resume accepting jobs.
+                    self.soft_stopping = False
+                else:
+                    self.log(f"Restart finished with '{restart_result}'. Node will not reconnect.", logging.ERROR)
         else:
             self.log(f"No baseline data for {model} to compare slow jobs. Defaulting to blacklisting.", logging.WARNING)
             if model not in self.blacklisted_models:

@@ -25,7 +25,8 @@ from dotenv import load_dotenv
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QCheckBox, QScrollArea,
-    QFrame, QGridLayout, QSpacerItem, QSizePolicy, QSystemTrayIcon, QMenu
+    QFrame, QGridLayout, QSpacerItem, QSizePolicy, QSystemTrayIcon, QMenu,
+    QDialog
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal as Signal, QObject
 from PyQt6.QtGui import QFont, QColor, QPixmap, QIcon, QAction
@@ -36,6 +37,10 @@ if not getattr(sys, 'frozen', False):
 
 import uvicorn
 from main import app as fastapi_app
+
+CLIENT_VERSION = 16
+VERSION_CHECK_URL = "https://thinkfarm.eu/api/version"
+
 
 def resource_path(relative_path: str) -> str:
     """Get absolute path to resource, works for dev and for PyInstaller."""
@@ -48,7 +53,7 @@ class ModelSignals(QObject):
 class QConsumerGUI(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("thinkfarm Client Control")
+        self.setWindowTitle("Client v16")
         self.resize(800, 900)
         
         self.server = None
@@ -71,6 +76,7 @@ class QConsumerGUI(QMainWindow):
         
         # Fetch models
         QTimer.singleShot(100, self.refresh_models)
+        QTimer.singleShot(300, self._check_version)
         
         self.setup_tray()
         self.start_btn.setFocus()
@@ -210,7 +216,7 @@ class QConsumerGUI(QMainWindow):
 
         sidebar_layout.addStretch()
 
-        self.info_label = QLabel("Client v15")
+        self.info_label = QLabel("Client v16")
         self.info_label.setStyleSheet("color: #8e8e93; font-size: 11px;")
         self.info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         sidebar_layout.addWidget(self.info_label)
@@ -408,6 +414,84 @@ class QConsumerGUI(QMainWindow):
         self.save_consumer_id()
         self.save_server_port()
         self.save_whitelist()
+
+    def _check_version(self):
+        """Fetch current app version from server and check against CLIENT_VERSION."""
+        url = VERSION_CHECK_URL
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code != 200:
+                return
+            data = resp.json()
+            server_client = data.get("client")
+            if server_client is None:
+                return
+            if server_client > CLIENT_VERSION:
+                download_url = data.get("download_url", "")
+                self._show_update_dialog(server_client, download_url)
+        except Exception:
+            pass  # network issue
+
+    def _show_update_dialog(self, server_version: int, download_url: str):
+        """Show a modal update available dialog."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("App Update Available")
+        dialog.setFixedWidth(380)
+        dialog.setWindowFlags(
+            dialog.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint
+        )
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(10)
+        title = QLabel("App update available")
+        title.setStyleSheet(
+            "font-size: 18px; font-weight: bold; color: #548889;"
+        )
+        layout.addWidget(title)
+        body = QLabel(
+            f"A newer version ({server_version}) is available from the server."
+        )
+        body.setStyleSheet("color: #1c1c1e; font-size: 13px;")
+        layout.addWidget(body)
+        desc = QLabel("Please update the client before continuing.")
+        desc.setStyleSheet("color: #8e8e93; font-size: 12px;")
+        layout.addWidget(desc)
+        if download_url:
+            link_btn = QPushButton(f"Download v{server_version}")
+            link_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #548889;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 10px 24px;
+                    font-weight: bold;
+                    font-size: 14px;
+                }
+                QPushButton:hover { background-color: #436d6e; }
+            """)
+            import webbrowser
+            link_btn.clicked.connect(lambda _: webbrowser.open(download_url))
+            layout.addSpacing(12)
+            layout.addWidget(link_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        close_btn = QPushButton("Ok")
+        close_btn.setFixedSize(200, 40)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover { background-color: #aeaeb2; }
+        """)
+        close_btn.clicked.connect(dialog.close)
+        layout.addSpacing(6)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        dialog.adjustSize()
+        dialog.exec()
 
     def refresh_models(self):
         """Fetch available models from the server in a background thread."""

@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QCheckBox, QGroupBox,
     QFormLayout, QSplitter, QFrame, QSystemTrayIcon, QMenu, QScrollArea,
-    QSlider
+    QSlider, QDialog
 )
 import requests
 from PyQt6.QtCore import pyqtSignal, QObject, Qt, QTimer
@@ -143,9 +143,13 @@ class ProviderThread(threading.Thread):
             self.loop.call_soon_threadsafe(self.loop.stop)
 
 
+PROVIDER_VERSION = 20
+
+
 class ThinkfarmApp(QMainWindow):
     models_loaded = pyqtSignal(list)
     provider_models_loaded = pyqtSignal(list)
+    VERSION_CHECK_URL = "https://thinkfarm.eu/api/version"
 
     def _get_free_port(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -296,6 +300,7 @@ class ThinkfarmApp(QMainWindow):
         
         QTimer.singleShot(100, self.refresh_models)
         QTimer.singleShot(100, self.refresh_provider_models)
+        QTimer.singleShot(500, self._check_version)
 
     def init_tray(self):
         # Create tray icon
@@ -362,7 +367,7 @@ class ThinkfarmApp(QMainWindow):
         QApplication.quit()
 
     def init_ui(self):
-        self.setWindowTitle("thinkfarm v18")
+        self.setWindowTitle("thinkfarm v20")
         self.resize(1400, 750)
         
         # Stylesheet to match qclient theme
@@ -1155,6 +1160,96 @@ class ThinkfarmApp(QMainWindow):
         arrow = "\u25b6" if self._provider_collapsed else "\u25bc"
         label = "Expand" if self._provider_collapsed else "Collapse"
         self._provider_collapse_btn.setText(f"{arrow} {label}")
+
+    def _check_version(self):
+        """Fetch current app version from server and check against PROVIDER_VERSION."""
+        url = self.VERSION_CHECK_URL
+
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code != 200:
+                return
+            data = resp.json()
+            server_provider = data.get("provider")
+            if server_provider is None:
+                return
+
+            if server_provider > PROVIDER_VERSION:
+                download_url = data.get("download_url", "")
+                self._show_update_dialog(server_provider, download_url)
+        except Exception:
+            pass  # network issue — silently skip
+
+    def _show_update_dialog(self, server_version: int, download_url: str):
+        """Show a modal update available dialog."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("App Update Available")
+        dialog.setFixedWidth(380)
+        dialog.setWindowFlags(
+            dialog.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint
+        )
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(10)
+
+        title = QLabel("App update available")
+        title.setStyleSheet(
+            "font-size: 18px; font-weight: bold; color: #548889;"
+        )
+        layout.addWidget(title)
+
+        body = QLabel(
+            f"A newer version ({server_version}) is available on the server."
+        )
+        body.setStyleSheet("color: #1c1c1e; font-size: 13px;")
+        layout.addWidget(body)
+
+        desc = QLabel("Please update the app before continuing.")
+        desc.setStyleSheet("color: #8e8e93; font-size: 12px;")
+        layout.addWidget(desc)
+
+        if download_url:
+            link_btn = QPushButton(f"Download v{server_version}")
+            link_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #548889;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 10px 24px;
+                    font-weight: bold;
+                    font-size: 14px;
+                }
+                QPushButton:hover { background-color: #436d6e; }
+            """)
+
+            def open_link():
+                import webbrowser
+                webbrowser.open(download_url)
+
+            link_btn.clicked.connect(open_link)
+            layout.addSpacing(12)
+            layout.addWidget(link_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        close_btn = QPushButton("Ok")
+        close_btn.setFixedSize(200, 40)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover { background-color: #aeaeb2; }
+        """)
+        close_btn.clicked.connect(dialog.close)
+        layout.addSpacing(6)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        dialog.adjustSize()
+        dialog.exec()
 
     def closeEvent(self, event):
         # Minimize to tray instead of quitting if the tray icon is visible
