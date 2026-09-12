@@ -528,13 +528,16 @@ class ProviderClient:
                     
                     delay = 0.0
                     if current_active >= max_slots:
-                        # Fully busy -> 2s delay
-                        delay += 2.0
+                        # Fully busy -> 1s delay (lose latency race vs idle peers)
+                        delay += 1.0
                     # Partially busy -> no delay
                         
-                    # Model unloaded -> 2s delay
+                    # Model unloaded -> 1s delay
                     if local_model_name not in self.loaded_models:
-                        delay += 2.0
+                        delay += 1.0
+                    # Cap total: must fit the server's Phase-1 accept window
+                    # with room for delivery + Ollama tags round-trip.
+                    delay = min(delay, 2.0)
                     
                     if delay > 0:
                         self.log(f"Delaying acceptance of job {job_id} by {delay:.1f}s (active: {current_active}/{max_slots}, loaded: {local_model_name in self.loaded_models})")
@@ -543,7 +546,7 @@ class ProviderClient:
                     if self.soft_stopping or not self.websocket:
                         return
                         
-                    self.log(f"Accepting job {job_id} for digest {digest} ({local_model_name})")
+                    self.log(f"Accepting job {job_id} for model: {local_model_name}")
                     accept_msg = {
                         "type": "accept",
                         "job_id": job_id,
@@ -865,11 +868,29 @@ class ProviderClient:
                 "stream": False,
                 "keep_alive": -1
             }
+            num_ctx = self.effective_num_ctx(model)
+            if num_ctx is not None:
+                body["options"] = {"num_ctx": num_ctx}
             async with httpx.AsyncClient(timeout=300.0) as client:
                 resp = await client.post(url, json=body)
                 return resp.status_code == 200
         except Exception:
             return False
+
+    def effective_num_ctx(self, model_name: str):
+        """Return the provider's effective context limit for a model, or None.
+
+        *model_name* may be the logical name or the 'thinkfarm-' variant name;
+        context_limits keys are always the logical names.
+        Returns None for embedding models (limit == -1) or unknown models.
+        """
+        logical = model_name[10:] if model_name.startswith("thinkfarm-") else model_name
+        limit = self.context_limits.get(logical)
+        if limit is None or limit <= 0:
+            return None
+        pressure = min(getattr(self.config, "context_pressure", 0.9), 1.0)
+        max_slots = max(1, getattr(self.config, "slots", 1))
+        return max(1, int(limit * pressure / max_slots))
 
     async def keep_model_loaded(self, model_name: str, is_embed: bool = False):
         try:
@@ -878,6 +899,15 @@ class ProviderClient:
                 "model": model_name,
                 "keep_alive": -1
             }
+            # Ollama no longer honors the Modelfile's PARAMETER num_ctx at load
+            # time (the thinkfarm- variant is created with one, but a request
+            # without options.num_ctx still loads at the 4096 default). Pin the
+            # context explicitly so cold loads use the probed limit instead of
+            # forcing a reload on the next real job. Uses the same value jobs
+            # are accepted against, so nothing is loaded larger than the limit.
+            num_ctx = None if is_embed else self.effective_num_ctx(model_name)
+            if num_ctx is not None:
+                body["options"] = {"num_ctx": num_ctx}
             if is_embed:
                 body["input"] = ""
             else:
@@ -940,6 +970,9 @@ class ProviderClient:
                         "stream": False,
                         "keep_alive": -1
                     }
+                    num_ctx = self.effective_num_ctx(model_name)
+                    if num_ctx is not None:
+                        body["options"] = {"num_ctx": num_ctx}
                     async with httpx.AsyncClient(timeout=30.0) as client:
                         resp = await client.post(url, json=body)
                         if resp.status_code == 200:
