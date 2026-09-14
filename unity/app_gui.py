@@ -143,7 +143,7 @@ class ProviderThread(threading.Thread):
             self.loop.call_soon_threadsafe(self.loop.stop)
 
 
-PROVIDER_VERSION = 21
+PROVIDER_VERSION = 22
 
 
 class ThinkfarmApp(QMainWindow):
@@ -367,7 +367,7 @@ class ThinkfarmApp(QMainWindow):
         QApplication.quit()
 
     def init_ui(self):
-        self.setWindowTitle("thinkfarm v21")
+        self.setWindowTitle("thinkfarm v22")
         self.resize(1400, 750)
         
         # Stylesheet to match qclient theme
