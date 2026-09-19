@@ -3,6 +3,18 @@ import sys
 import multiprocessing
 
 # ---------------------------------------------------------------------------
+# SSL Certificate Configuration (PyInstaller compatibility)
+# ---------------------------------------------------------------------------
+# In a PyInstaller bundle on Windows, macOS, or different Linux distros, OpenSSL's
+# default certificate paths do not exist. Point SSL_CERT_FILE to certifi's bundle.
+try:
+    import certifi
+    if 'SSL_CERT_FILE' not in os.environ or not os.path.exists(os.environ['SSL_CERT_FILE']):
+        os.environ['SSL_CERT_FILE'] = certifi.where()
+except Exception:
+    pass
+
+# ---------------------------------------------------------------------------
 # PyInstaller & Windows Console Redirection
 # ---------------------------------------------------------------------------
 if sys.platform == "win32":

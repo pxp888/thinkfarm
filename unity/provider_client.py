@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 import httpx
 import websockets
+import ssl
+import certifi
 from config import ConfigManager
 
 logger = logging.getLogger("thinkfarm.provider")
@@ -262,17 +264,21 @@ class ProviderClient:
             context_limits = {}
             for m in models:
                 name = m.get("name")
+                digest = m.get("digest")
                 if name:
                     # Apply context_pressure and slot division to the cached limit
                     limit = limits.get(name)
                     pressure = min(getattr(self.config, "context_pressure", 0.9), 1.0)
                     max_slots = max(1, getattr(self.config, "slots", 1))
                     if limit is not None and limit > 0:
-                        context_limits[name] = max(1, int(limit * pressure / max_slots))
+                        eff_limit = max(1, int(limit * pressure / max_slots))
                     elif limit == -1:
-                        context_limits[name] = -1
+                        eff_limit = -1
                     else:
-                        context_limits[name] = 8192
+                        eff_limit = 8192
+                    context_limits[name] = eff_limit
+                    if digest:
+                        context_limits[digest] = eff_limit
             
             status_msg = {
                 "type": "status",
@@ -367,7 +373,24 @@ class ProviderClient:
                 if self.status_callback:
                     self.status_callback("Connecting")
                 
-                async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
+                ssl_context = None
+                if ws_scheme == "wss":
+                    try:
+                        ssl_context = ssl.create_default_context(cafile=certifi.where())
+                        try:
+                            ssl_context.load_default_certs()
+                        except Exception:
+                            pass
+                    except Exception as ssl_err:
+                        self.log(f"Warning: Failed to create SSL context with certifi: {ssl_err}")
+                        ssl_context = ssl.create_default_context()
+
+                async with websockets.connect(
+                    ws_url,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    ssl=ssl_context,
+                ) as ws:
                     self.websocket = ws
                     self.log("WebSocket connected successfully")
                     if self.status_callback:
@@ -635,6 +658,13 @@ class ProviderClient:
         # Ensure model is kept loaded in memory indefinitely (-1)
         body["keep_alive"] = -1
 
+        # Strip num_ctx so varying context lengths don't force Ollama to reload the
+        # model between jobs. Let Ollama keep using the already-loaded context.
+        if isinstance(body.get("options"), dict) and "num_ctx" in body["options"]:
+            del body["options"]["num_ctx"]
+            if not body["options"]:
+                del body["options"]
+
         self.log(f"Executing job {job_id} on local Ollama: {ollama_path}")
         start_time = time.time()
         eval_count = 0
@@ -786,7 +816,7 @@ class ProviderClient:
             await self.websocket.send(json.dumps(done_msg))
             
             # Performance monitoring (Slope Monitor & Zero-Eval detection)
-            await self.monitor_performance(requested_model, eval_count, duration_ns, endpoint, has_output)
+            await self.monitor_performance(requested_model, eval_count, duration_ns, endpoint, has_output, sanity_model=actual_model)
 
         except asyncio.CancelledError:
             self.log(f"Job {job_id} was cancelled.")
@@ -817,7 +847,7 @@ class ProviderClient:
                 # expected to pick this up and reconnect, so do NOT kill `running` here.
                 self.log("Drained jobs during soft stop. Leaving reconnection to the run loop.")
 
-    async def monitor_performance(self, model: str, eval_count: int, duration_ns: int, endpoint: str, has_output: bool):
+    async def monitor_performance(self, model: str, eval_count: int, duration_ns: int, endpoint: str, has_output: bool, sanity_model: str = None):
         # Skip performance/zero-eval monitoring for non-generative endpoints
         # (embeddings, /api/show metadata calls). Zero tokens is normal for those.
         if endpoint in ("embed", "embeddings", "show"):
@@ -829,7 +859,11 @@ class ProviderClient:
                 self.log("Zero evaluation detected but no model name resolvable. Skipping sanity check (no model configured to test).", logging.WARNING)
                 return
             self.log(f"Zero evaluation detected for model {model}. Running sanity check test...")
-            sanity_success = await self.run_sanity_check(model)
+            # Test the model that actually served this job (the thinkfarm- variant
+            # when one is in use), not the base model — otherwise the check validates
+            # a model we never serve and can miss a broken custom variant.
+            sanity_model = sanity_model or model
+            sanity_success = await self.run_sanity_check(sanity_model)
             if not sanity_success:
                 self.log(f"Sanity check failed for model {model}! Triggering Ollama restart...", logging.CRITICAL)
                 asyncio.create_task(self.restart_ollama())
@@ -868,29 +902,11 @@ class ProviderClient:
                 "stream": False,
                 "keep_alive": -1
             }
-            num_ctx = self.effective_num_ctx(model)
-            if num_ctx is not None:
-                body["options"] = {"num_ctx": num_ctx}
             async with httpx.AsyncClient(timeout=300.0) as client:
                 resp = await client.post(url, json=body)
                 return resp.status_code == 200
         except Exception:
             return False
-
-    def effective_num_ctx(self, model_name: str):
-        """Return the provider's effective context limit for a model, or None.
-
-        *model_name* may be the logical name or the 'thinkfarm-' variant name;
-        context_limits keys are always the logical names.
-        Returns None for embedding models (limit == -1) or unknown models.
-        """
-        logical = model_name[10:] if model_name.startswith("thinkfarm-") else model_name
-        limit = self.context_limits.get(logical)
-        if limit is None or limit <= 0:
-            return None
-        pressure = min(getattr(self.config, "context_pressure", 0.9), 1.0)
-        max_slots = max(1, getattr(self.config, "slots", 1))
-        return max(1, int(limit * pressure / max_slots))
 
     async def keep_model_loaded(self, model_name: str, is_embed: bool = False):
         try:
@@ -899,15 +915,6 @@ class ProviderClient:
                 "model": model_name,
                 "keep_alive": -1
             }
-            # Ollama no longer honors the Modelfile's PARAMETER num_ctx at load
-            # time (the thinkfarm- variant is created with one, but a request
-            # without options.num_ctx still loads at the 4096 default). Pin the
-            # context explicitly so cold loads use the probed limit instead of
-            # forcing a reload on the next real job. Uses the same value jobs
-            # are accepted against, so nothing is loaded larger than the limit.
-            num_ctx = None if is_embed else self.effective_num_ctx(model_name)
-            if num_ctx is not None:
-                body["options"] = {"num_ctx": num_ctx}
             if is_embed:
                 body["input"] = ""
             else:
@@ -970,9 +977,6 @@ class ProviderClient:
                         "stream": False,
                         "keep_alive": -1
                     }
-                    num_ctx = self.effective_num_ctx(model_name)
-                    if num_ctx is not None:
-                        body["options"] = {"num_ctx": num_ctx}
                     async with httpx.AsyncClient(timeout=30.0) as client:
                         resp = await client.post(url, json=body)
                         if resp.status_code == 200:
@@ -1206,17 +1210,12 @@ class ProviderClient:
         except Exception:
             pass
             
-        num_ctx = self.context_limits.get(priority_model, 2048)
-        if num_ctx <= 0:
-            num_ctx = 2048
-            
         test_url = f"{self.config.local_ollama_url.rstrip('/')}/api/generate"
         payload = {
             "model": model_to_test,
             "prompt": "what is the history of Sweden?",
             "stream": False,
             "options": {
-                "num_ctx": num_ctx,
                 "temperature": 0.2
             }
         }
