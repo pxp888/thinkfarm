@@ -96,3 +96,7 @@ gunicorn.pid
 *.exe
 *_spec.py
 debug/
+
+# Archives
+*.tar.gz
+*.zip

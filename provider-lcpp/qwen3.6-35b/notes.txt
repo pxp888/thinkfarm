@@ -1,0 +1,6 @@
+unsloth/Qwen3.6-35B-A3B-MTP-GGUF
+
+
+https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf?download=true
+https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/resolve/main/mmproj-BF16.gguf?download=true
+
