@@ -15,42 +15,50 @@ Think Farm consists of two roles:
 
 ## Architecture
 
+Think Farm has three moving parts: a **consumer app** that presents network models as a local Ollama/OpenAI API, a **central server** (`app.thinkfarm.net`) that routes inference jobs, and **provider nodes** that run the actual inference on their own hardware. The provider app bundles its inference engine directly — it spawns and supervises its own `llama-server` (llama.cpp) child process and executes every job locally; it is not a proxy for Ollama or any other pre-existing runner.
+
 ```mermaid
 flowchart TB
-    ClientApps["Client Apps\n(OpenAI / Ollama compatible)"] -->|HTTP POST| ConsumerProxy
+    ClientApps["Client Apps<br/>(OpenAI / Ollama compatible)"] -->|HTTP · localhost:11435| ConsumerProxy
+    CloudClients["Direct cloud clients & OpenRouter<br/>fail-fast routing, 429 backpressure"]
 
-    subgraph Consumer["Consumer Node (consumer/)"]
-        direction TB
-        ConsumerProxy["Local Proxy Server\nlocalhost:11435"]
-        ConsumerProxy -->|Proxy| OpenAIGW[OpenAI API Gateway]
-        ConsumerProxy -->|Proxy| OllamaGW[Ollama API Gateway]
-        OpenAIGW & OllamaGW --> Streaming[Streaming Response]
+    subgraph ConsumerNode["Consumer Node (consumer/)"]
+        ConsumerProxy["Local API Proxy — FastAPI on port 11435<br/>Ollama: /api/chat · /api/generate · /api/embed …<br/>OpenAI: /v1/chat/completions · /v1/models …"]
     end
 
-    subgraph ThinkFarm["Think Farm Network"]
-        WS["Central Server\nWebSocket Job Routing"]
+    subgraph CentralServer["Central Server (app.thinkfarm.net) — stateless FastAPI instances"]
+        REST["REST Inference API<br/>consumer-ID auth · num_ctx estimation"]
+        Router["Job Router<br/>model alias → digest resolution<br/>context-aware provider selection (Redis ZSETs)<br/>dispatch → accept race → assign<br/>timeouts · cancellation · failover retries"]
+        State[("Live routing state: Redis/Valkey cluster<br/>Job history & analytics: PostgreSQL")]
+        REST --> Router
+        Router <--> State
     end
 
-    ConsumerProxy <-->|WebSocket / REST| WS
-    WS <-->|WebSocket Jobs| ProviderDaemon
+    ConsumerProxy <-->|"HTTPS + X-Consumer-ID, response streamed back"| REST
+    CloudClients -->|HTTPS| REST
 
-    subgraph Provider["Provider Node (provider-lcpp/)"]
-        direction TB
-        ProviderDaemon["Provider Client / Daemon\n(app.py / gui.py)"]
-        ProviderDaemon -->|Lifecycle & Inference| LlamaServer["Bundled llama-server\n(llama.cpp + CUDA 13)"]
-        LlamaServer --> ModelFiles["GGUF Models\n(Base + mmproj + MTP Draft)"]
+    subgraph ProviderNode["Provider Node (provider-lcpp/)"]
+        Daemon["Provider daemon / GUI (app.py, gui.py)<br/>WebSocket client · model & process supervisor"]
+        LlamaServer["Bundled llama-server child process<br/>(llama.cpp + CUDA 13 runtime)<br/>runs inference on this machine's GPU"]
+        Weights[("GGUF weights<br/>base + mmproj + MTP draft")]
+        Daemon -->|"spawn · supervise · local HTTP jobs"| LlamaServer
+        LlamaServer --- Weights
     end
 
-    LlamaServer -->|Token Streaming| ProviderDaemon
-    ProviderDaemon -->|Stream Results| WS
+    Router -->|"job dispatch & assignment (model, endpoint, request body)"| Daemon
+    Daemon -->|"status heartbeats · accept · token chunks · job_done"| Router
+    LlamaServer -->|"streaming tokens"| Daemon
 ```
+
+**The central server.** It runs as multiple stateless FastAPI instances sharing live routing state in a Redis/Valkey cluster: provider status, per-model idle sets scored by context window, and active-job tracking. Completed jobs (provider, model, token counts, duration) are persisted to PostgreSQL for history, performance analytics, and revenue reporting. The same REST inference API also fronts Think Farm's hosted models for direct cloud clients — including OpenRouter, where capacity is advertised per slot (RPM/TPM scaled by an operator-set capacity factor) and the server fails fast with `429` backpressure instead of queueing when no provider is idle.
 
 **Data flow:**
 
 1. **Client** sends a request to the consumer's local proxy (e.g., `http://localhost:11435/v1/chat/completions` or `http://localhost:11435/api/generate`).
-2. The consumer forwards the request to the central server, which routes the job over a WebSocket to an available provider node hosting the requested model.
-3. The **Provider** executes inference against its managed `llama-server` process.
-4. Results stream back through the network WebSocket to the consumer's local proxy, which streams them to the client.
+2. The consumer forwards it over HTTPS to the central server with its `X-Consumer-ID`, and — when no context size was specified — estimates a safe `num_ctx` from the request body so long prompts aren't silently truncated by provider defaults.
+3. The **central server** resolves the model name (or alias) to a content digest, queries Redis for idle providers whose context window fits, dispatches the job over each candidate's WebSocket (up to 7), runs a short accept race so competing acceptances are drawn fairly, and assigns the winner along with the endpoint and request body. If no idle provider accepts in time it falls back to busy/higher-context providers; if the first token doesn't arrive within ~90 s it cancels that job and retries on another provider (up to 3 attempts).
+4. The **provider** executes the job against its own bundled `llama-server` child process — inference runs on the node's own GPU, not a remote or third-party service — translating Ollama-format jobs into llama.cpp's OpenAI-compatible API as needed, and streams tokens back over the WebSocket in ~75 ms batches.
+5. The central server relays chunks down the consumer's HTTPS stream (SSE for OpenAI endpoints, NDJSON for Ollama ones); the consumer pipes them through to the client unchanged. When the provider reports `job_done` with token counts, the server records a job row for history and analytics.
 
 ## Quick Start
 
@@ -205,8 +213,8 @@ The Consumer node exposes the following endpoints on `http://localhost:11435`:
 | `app.py` | Headless provider daemon & process supervisor: spawns child `llama-server`, monitors readiness, handles signals, and routes WebSocket jobs. |
 | `downloader.py` | Resumable chunked model downloader with HTTP Range requests, SHA-256 integrity verification, and disk space pre-checks. |
 | `lcpp/` | Core provider client implementation and WebSocket communication protocol. |
-| `llama-b11064/` | Pre-built `llama-server` binary and GGML runtime shared libraries. |
-| `cudart-llama-b11064-bin-ubuntu-cuda-13.3-x64/` | Bundled CUDA 13.3 runtime libraries. |
+| `bin/` | Pre-built `llama-server` binary and GGML runtime shared libraries (older bundles used `llama-b11064/`). |
+| `cudart/` | Bundled CUDA 13.3 runtime libraries (older bundles used `cudart-llama-b11064-bin-ubuntu-cuda-13.3-x64/`; on Windows the DLLs are co-located in `bin/`). |
 
 ## Consumer Internals (`consumer`)
 

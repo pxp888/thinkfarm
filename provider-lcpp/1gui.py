@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """PyQt6 dashboard for the self-contained thinkfarm provider app.
 
-Light macOS-style theme (grey canvas, white cards, teal accent): config form
-left, activity log right, status dots, tray icon — close minimizes to tray.
-The heavy lifting
+Same look & feel as 2llamashare/unity/app_gui.py (config form left, activity
+log right, status dots, tray icon — close minimizes to tray). The heavy lifting
 is exactly what thinkfarm.sh / app.py does: this module reuses app.LlamaServer and
 lcpp's ProviderClient in a worker thread. Nothing here changes provider behavior.
 
@@ -85,7 +84,8 @@ class StatusIndicator(QFrame):
         color = colors.get(status, "#8e8e93")
         self.setStyleSheet(f"""
             background-color: {color};
-            border: 1px solid rgba(0, 0, 0, 0.08);
+            border-radius: 7px;
+            border: none;
         """)
 
 
@@ -308,56 +308,47 @@ class ThinkfarmProviderApp(QMainWindow):
 
         # Stylesheet matching the unity app theme.
         self.setStyleSheet("""
-            QMainWindow { background-color: #f5f5f7; }
+            QMainWindow { background-color: #ffffff; }
             QWidget { color: #1c1c1e; font-family: "Inter", "Ubuntu", "Segoe UI", sans-serif; font-size: 13px; }
             QGroupBox {
-                border: 1px solid rgba(0, 0, 0, 0.08);
-                margin-top: 14px; padding: 18px 16px 16px;
+                border: 1px solid rgba(0, 0, 0, 0.1);
+                border-radius: 0px; margin-top: 12px; padding-top: 16px;
                 background-color: #ffffff;
             }
             QGroupBox::title {
                 subcontrol-origin: margin; subcontrol-position: top left;
-                left: 16px; padding: 0 6px;
-                font-size: 12px; font-weight: bold; letter-spacing: 0.4px; color: #548889;
+                left: 10px; padding: 0 5px; font-weight: bold; color: #548889;
             }
             QLineEdit {
-                background-color: #f5f5f7; border: 1px solid rgba(0, 0, 0, 0.12);
-                padding: 8px 10px; color: #1c1c1e;
+                background-color: #f5f5f7; border: 1px solid transparent;
+                border-radius: 0px; padding: 8px; color: #1c1c1e;
                 font-family: "JetBrains Mono", "Fira Code", "Monospace";
             }
-            QLineEdit:focus { background-color: #ffffff; border: 1px solid #548889; }
+            QLineEdit:focus { background-color: #ffffff; border-color: #548889; border: 1px solid #548889; }
             QComboBox {
-                background-color: #f5f5f7; border: 1px solid rgba(0, 0, 0, 0.12);
-                padding: 8px 10px; color: #1c1c1e;
+                background-color: #f5f5f7; border: 1px solid transparent;
+                border-radius: 0px; padding: 8px; color: #1c1c1e;
             }
-            QComboBox:focus { background-color: #ffffff; border: 1px solid #548889; }
-            QComboBox::drop-down { width: 22px; border-left: none; }
+            QComboBox:focus { background-color: #ffffff; border-color: #548889; border: 1px solid #548889; }
+            QComboBox::drop-down { width: 20px; border-left: none; }
             QComboBox QAbstractItemView {
                 background-color: #ffffff; color: #1c1c1e;
                 border: 1px solid rgba(0, 0, 0, 0.1);
                 selection-background-color: #548889; selection-color: white;
             }
             QPushButton {
-                background-color: #ffffff; border: 1px solid rgba(0, 0, 0, 0.14);
-                padding: 8px 16px; color: #3a3a3c; font-weight: bold;
+                background-color: transparent; border: 1px solid rgba(0, 0, 0, 0.1);
+                border-radius: 0px; padding: 8px 16px; color: #8e8e93; font-weight: bold;
             }
-            QPushButton:hover { background-color: #f0f0f2; border-color: rgba(0, 0, 0, 0.24); }
-            QPushButton:pressed { background-color: #e8e8ed; }
-            QPushButton#actionButton { background-color: #548889; color: white; font-weight: bold; border: none; padding: 10px 16px; }
+            QPushButton:hover { background-color: rgba(84, 136, 137, 0.08); color: #548889; }
+            QPushButton#actionButton { background-color: #548889; color: white; border-radius: 0px; font-weight: bold; border: none; }
             QPushButton#actionButton:hover { background-color: #436d6e; }
-            QPushButton#actionButton:disabled { background-color: #d2d2d7; color: white; }
+            QPushButton#actionButton:disabled { background-color: #d2d2d7; color: #8e8e93; }
             QTextEdit {
-                background-color: #f5f5f7; border: 1px solid rgba(0, 0, 0, 0.06);
-                padding: 10px 12px;
-                font-family: "JetBrains Mono", "Fira Code", "Monospace", monospace;
-                font-size: 12px; color: #48484a;
+                background-color: #f5f5f7; border: 1px solid rgba(0, 0, 0, 0.1);
+                border-radius: 0px; font-family: "JetBrains Mono", "Fira Code", "Monospace", monospace;
+                font-size: 12px; color: #1c1c1e;
             }
-            QTextEdit::selection { background-color: rgba(84, 136, 137, 0.25); }
-            QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
-            QScrollBar::handle:vertical { background: #cfcfd4; min-height: 32px; }
-            QScrollBar::handle:vertical:hover { background: #aeaeb2; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
         """)
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -427,12 +418,14 @@ class ThinkfarmProviderApp(QMainWindow):
         dl_layout.addWidget(self.download_btn)
 
         self.download_progress_bar = QProgressBar()
-        self.download_progress_bar.setTextVisible(False)
         self.download_progress_bar.setStyleSheet("""
             QProgressBar {
-                border: 1px solid rgba(0, 0, 0, 0.08);
-                height: 10px;
-                background-color: #e9e9ee;
+                border: 1px solid rgba(0, 0, 0, 0.1);
+                border-radius: 0px;
+                text-align: center;
+                font-size: 11px;
+                height: 18px;
+                background-color: #f5f5f7;
             }
             QProgressBar::chunk {
                 background-color: #548889;
@@ -459,7 +452,7 @@ class ThinkfarmProviderApp(QMainWindow):
         provider_layout.addWidget(self.toggle_btn)
 
         log_path_lbl = QLabel(f"llama-server log: {app.SERVER_LOG}")
-        log_path_lbl.setStyleSheet("color: #6b7280; font-size: 11px;")
+        log_path_lbl.setStyleSheet("color: #8e8e93; font-size: 11px;")
         log_path_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         provider_layout.addWidget(log_path_lbl)
 
@@ -481,8 +474,8 @@ class ThinkfarmProviderApp(QMainWindow):
         right_layout = QVBoxLayout(self.log_panel)
         right_layout.setContentsMargins(10, 10, 10, 10)
 
-        log_group = QGroupBox("Activity Logs")
-        lg_layout = QVBoxLayout(log_group)
+        log_label = QLabel("Activity Logs:")
+        log_label.setStyleSheet("font-weight: bold; color: #548889;")
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
 
@@ -490,11 +483,10 @@ class ThinkfarmProviderApp(QMainWindow):
         clear_logs_btn = QPushButton("Clear Logs")
         clear_logs_btn.clicked.connect(self.log_area.clear)
         clear_btns.addWidget(clear_logs_btn)
-        clear_btns.addStretch()
 
-        lg_layout.addWidget(self.log_area)
-        lg_layout.addLayout(clear_btns)
-        right_layout.addWidget(log_group)
+        right_layout.addWidget(log_label)
+        right_layout.addWidget(self.log_area)
+        right_layout.addLayout(clear_btns)
         self.main_splitter.addWidget(self.log_panel)
 
         self.main_splitter.setSizes([480, 620])
@@ -706,7 +698,7 @@ class ThinkfarmProviderApp(QMainWindow):
     # ----------------------------------------------------------------- logs
     def append_log(self, message, level):
         color_map = {
-            "INFO": "#48484a",
+            "INFO": "#1c1c1e",
             "WARNING": "#b45309",
             "ERROR": "#b91c1c",
             "CRITICAL": "#b91c1c",
@@ -821,6 +813,7 @@ class ThinkfarmProviderApp(QMainWindow):
                     background-color: #548889;
                     color: white;
                     border: none;
+                    border-radius: 4px;
                     padding: 10px 24px;
                     font-weight: bold;
                     font-size: 14px;
@@ -842,6 +835,7 @@ class ThinkfarmProviderApp(QMainWindow):
             QPushButton {
                 background-color: #d2d2d7;
                 border: none;
+                border-radius: 4px;
                 font-weight: bold;
                 font-size: 14px;
             }
