@@ -28,7 +28,7 @@ class ConfigManager:
         self.gb_allowed: float = 0.0
         self.lcpp_restart_cmd: str = ""
         self.managed_lcpp: bool = os.name == "nt"
-        self.lcpp_models_path: str = ""
+        self.models_path: str = ""
         self.model_name: str = ""
         self.model_digest: str = ""
         self.selected_model: str = ""  # which bundled model the provider-lcpp app should load
@@ -109,7 +109,13 @@ class ConfigManager:
         self.port = int(v(self._SECTION_CONSUMER, "CLIENT_PORT", "11435") or "11435")
         self.local_lcpp_url = v(self._SECTION_PROVIDER, "LOCAL_LCPP_URL", "") or v(self._SECTION_PROVIDER, "LOCAL_OLLAMA_URL", "http://localhost:8080") or self.local_lcpp_url
         self.lcpp_restart_cmd = v(self._SECTION_PROVIDER, "LCPP_RESTART_CMD", "") or v(self._SECTION_PROVIDER, "OLLAMA_RESTART_CMD", "") or self.lcpp_restart_cmd
-        self.lcpp_models_path = v(self._SECTION_PROVIDER, "LCPP_MODELS_PATH", "") or v(self._SECTION_PROVIDER, "OLLAMA_MODELS_PATH", "") or self.lcpp_models_path
+        # MODELS_PATH; legacy names still honored for existing configs.
+        self.models_path = (
+            v(self._SECTION_PROVIDER, "MODELS_PATH", "")
+            or v(self._SECTION_PROVIDER, "LCPP_MODELS_PATH", "")
+            or v(self._SECTION_PROVIDER, "OLLAMA_MODELS_PATH", "")
+            or self.models_path
+        )
         # Legacy fallback only — the published identity now lives in each
         # ModelSpec (app.apply_publish_info overrides these).
         self.model_name = v(self._SECTION_PROVIDER, "MODEL_NAME", "") or ""
@@ -163,10 +169,10 @@ class ConfigManager:
         raw.set(self._SECTION_PROVIDER, "AUTO_MANAGE_MODELS", "true" if self.auto_manage_models else "false")
         raw.set(self._SECTION_PROVIDER, "GB_ALLOWED", str(self.gb_allowed))
         raw.set(self._SECTION_PROVIDER, "LCPP_RESTART_CMD", self.lcpp_restart_cmd)
-        raw.set(self._SECTION_PROVIDER, "LCPP_MODELS_PATH", self.lcpp_models_path)
+        raw.set(self._SECTION_PROVIDER, "MODELS_PATH", self.models_path)
         # MODEL_NAME / MODEL_DIGEST intentionally not written: the published
         # identity is defined by the model spec (app.apply_publish_info).
-        for legacy_key in ("MODEL_NAME", "MODEL_DIGEST"):
+        for legacy_key in ("MODEL_NAME", "MODEL_DIGEST", "LCPP_MODELS_PATH"):
             if raw.has_option(self._SECTION_PROVIDER, legacy_key):
                 raw.remove_option(self._SECTION_PROVIDER, legacy_key)
         raw.set(self._SECTION_PROVIDER, "SELECTED_MODEL", self.selected_model)

@@ -18,7 +18,7 @@ import logging
 import os
 import signal
 import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import subprocess
 import sys
 import time
@@ -65,7 +65,11 @@ def required_binaries() -> list[Path]:
             else:
                 bins.append(CUDART_DIR / "cudart64_13.dll")
         else:
-            bins.append(CUDART_DIR / "libcudart.so.13")
+            cudarts = list(CUDART_DIR.glob("libcudart.so.*")) + list(BIN_DIR.glob("libcudart.so.*"))
+            if cudarts:
+                bins.append(cudarts[0])
+            else:
+                bins.append(CUDART_DIR / "libcudart.so.13")
     return bins
 # --- bundled models ---------------------------------------------------------
 # Exactly one of these is loaded into the child llama-server at a time. They
@@ -147,6 +151,17 @@ MODELS = {
     ),
 }
 DEFAULT_MODEL = "qwen3.8-27b"
+
+
+def apply_models_dir(config) -> None:
+    """Rebind model folders to MODELS_PATH (custom.ini / .env). Affects both
+    the download target and where llama-server loads from; empty = next to
+    the app."""
+    if not config.models_path:
+        return
+    base = Path(os.path.expanduser(config.models_path))
+    for name in MODELS:
+        MODELS[name] = replace(MODELS[name], directory=base / name)
 
 
 def parse_model_arg(argv: list[str]) -> str | None:
@@ -396,9 +411,7 @@ class LlamaServer:
                         entry = r.json().get("data", [{}])[0]
                         name = entry.get("id", "?")
                         n_ctx = (entry.get("meta") or {}).get("n_ctx")
-                        print(f"[app] llama-server ready — model: {name}"
-                              + (f", context window: {n_ctx:,} tokens" if n_ctx else ""))
-                        return
+                        return name, n_ctx
                 except Exception:
                     pass
                 await asyncio.sleep(1.0)
@@ -442,6 +455,7 @@ def main():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     config = ConfigManager(str(ROOT))
+    apply_models_dir(config)
     model_name = resolve_model(parse_model_arg(sys.argv), saved=config.selected_model)
 
     if "--download" in sys.argv:
@@ -481,13 +495,16 @@ def main():
     async def run():
         runner.start()
         try:
-            await runner.wait_ready(shutdown_event)
+            ready_name, n_ctx = await runner.wait_ready(shutdown_event)
         except ShutdownRequested:
             print("\n[app] Shutdown requested during model load.")
             runner.stop()
             if not shutdown_event.is_set():
                 shutdown_event.set()
             return
+
+        print(f"[app] llama-server ready — model: {ready_name}"
+              + (f", context window: {n_ctx:,} tokens" if n_ctx else ""))
 
         try:
             p_client = ProviderClient(

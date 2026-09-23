@@ -33,7 +33,13 @@ fi
 
 UPSTREAM="upstream-bins"
 WHEEL_CACHE_ROOT=".wheel-cache"
-VERSION="b11064"
+VERSION="b11125"
+PROVIDER_VERSION=$(sed -n -E "s/^PROVIDER_VERSION[[:space:]]*=[[:space:]]*['\"]?([^ '\"#]+).*/\1/p" gui.py | head -n 1)
+if [ -z "$PROVIDER_VERSION" ]; then
+    echo "[build] ERROR: Could not extract PROVIDER_VERSION from gui.py" >&2
+    exit 1
+fi
+echo "[build] Provider version: $PROVIDER_VERSION (upstream: $VERSION)"
 DIST_DIR="$(realpath -m "$DIST_DIR")"
 mkdir -p "$DIST_DIR"
 
@@ -118,7 +124,7 @@ build_variant() {
     [[ "$variant" =~ ^win- ]] && os="win"
     [[ "$variant" =~ -vulkan$ ]] && backend="vulkan"
 
-    local bundle="thinkfarm-provider-${variant}-${VERSION}"
+    local bundle="thinkfarm-provider-${variant}-${VERSION}-${PROVIDER_VERSION}"
     local stage="$DIST_DIR/stage/$bundle"
     rm -rf "$stage"
     mkdir -p "$stage/bin"

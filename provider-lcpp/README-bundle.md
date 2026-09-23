@@ -36,8 +36,13 @@ or the Model dropdown in the GUI (persisted to `~/.thinkfarm/custom.ini`):
   `mtp-Qwen3.8-27B-Q4_0.gguf` (MTP draft for speculative decoding)
 - `qwen3.6-35b/` — `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`, `mmproj-BF16.gguf`
 
-Each model's published name + digest reported to the central server is
-configured in its model specification (e.g. `qwen3.8:27b-ud-q4_k_m`).
+By default each model downloads into and loads from its folder next to the app.
+To store weights elsewhere (e.g. a bigger disk), set `MODELS_PATH` in
+`~/.thinkfarm/custom.ini` — both download and load use it, keeping the same
+per-model subfolders:
+
+    [provider]
+    MODELS_PATH = /mnt/persist/models
 
 The selected model's required files are checked at startup. If files are missing,
 you can download them automatically by clicking **Download Model** in the dashboard GUI,

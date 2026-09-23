@@ -52,7 +52,7 @@ try:
 except ImportError:
     requests = None
 
-PROVIDER_VERSION = 28
+PROVIDER_VERSION = 29
 
 
 class AppSignals(QObject):

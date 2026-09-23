@@ -550,10 +550,12 @@ class ProviderClient:
             
         if "keep_alive" in translated_body:
             del translated_body["keep_alive"]
-        if "stream_options" in translated_body:
-            del translated_body["stream_options"]
 
         is_stream = translated_body.get("stream", False)
+        if is_stream and "v1/" in lcpp_path:
+            translated_body["stream_options"] = {"include_usage": True}
+        elif "stream_options" in translated_body:
+            del translated_body["stream_options"]
 
         self.log(f"Executing job {job_id} on local llama.cpp: {lcpp_path}")
         start_time = time.time()

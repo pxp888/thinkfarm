@@ -62,6 +62,9 @@ caches. Defaults to the public central server `https://app.thinkfarm.net`.
   port you own, e.g. `LOCAL_PORT=8086 ./thinkfarm.sh`.
 - `READY_TIMEOUT` (env seconds, default 1800) — how long to wait for the
   child to report ready.
+- `MODELS_PATH` (`custom.ini`, `[provider]`) — relocate where model weights
+  are downloaded and loaded from, e.g. `MODELS_PATH=/mnt/persist/models`
+  (per-model subfolders like `qwen3.8-27b/` are kept underneath it).
 
 ## Gotchas
 

@@ -46,7 +46,7 @@ if exist "venv\Scripts\python.exe" (
         pause
         exit /b 1
     )
-    echo [run] Creating virtual environment (one-time setup)...
+    echo [run] Creating virtual environment [one-time setup]...
     %SYS_PY% -m venv venv
     if errorlevel 1 (
         echo [run] ERROR: Failed to create virtual environment.
@@ -55,11 +55,11 @@ if exist "venv\Scripts\python.exe" (
     )
     set "PY=.\venv\Scripts\python.exe"
     set "PYW=.\venv\Scripts\pythonw.exe"
-    echo [run] Installing dependencies (!PKG_LIST!)...
+    echo [run] Installing dependencies: !PKG_LIST!...
     if exist "wheelhouse\*.whl" (
         !PY! -m pip install --quiet --no-index --find-links wheelhouse !PKG_LIST!
         if errorlevel 1 (
-            echo [run] Bundled wheels did not match interpreter — trying network install...
+            echo [run] Bundled wheels did not match interpreter -- trying network install...
             !PY! -m pip install --quiet !PKG_LIST!
         )
     ) else (
