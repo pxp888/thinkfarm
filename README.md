@@ -4,7 +4,7 @@
 
 A distributed local LLM inference sharing system that lets you **provide** models to a network and **consume** models from other nodes — all presented through a unified **Ollama- and OpenAI-compatible API**.
 
-Visit [www.thinkfarm.net](https://www.thinkfarm.net) for the full project site.
+Visit [www.thinkfarm.eu](https://www.thinkfarm.eu) for the full project site.
 
 Think Farm consists of two roles:
 
