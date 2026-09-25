@@ -85,7 +85,7 @@ class QConsumerGUI(QMainWindow):
         """Load SERVER_URL from .env file."""
         env_path = resource_path(".env")
         load_dotenv(env_path)
-        self.server_url = os.environ.get("SERVER_URL", "https://app.thinkfarm.net")
+        self.server_url = os.environ.get("SERVER_URL", "https://app.thinkfarm.eu")
 
     def load_port(self):
         """Load the port from ~/.thinkfarm/config.ini, defaulting to 11434."""

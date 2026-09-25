@@ -149,6 +149,34 @@ MODELS = {
         publish_name="qwen3.6:35b-a3b-ud-q4_k_m",
         publish_digest="0b21525e972670ed59e1812e170b27c26355381f0656ecc4e25617ece7dac58b",
     ),
+    "qwen3.5-9b": ModelSpec(
+        label="Qwen3.5 9B",
+        directory=ROOT / "qwen3.5-9b",
+        main_model=Path("Qwen3.5-9B-Q4_K_M.gguf"),
+        mmproj=Path("mmproj-BF16.gguf"),
+        # MTP module is baked into the main GGUF (unsloth -MTP-GGUF repo); no
+        # separate --spec-draft-model file needed.
+        extra_args=(
+            ("--spec-type", "draft-mtp"),
+            ("--spec-draft-n-max", "6"),
+        ),
+        downloads=(
+            ModelFileArtifact(
+                rel_path=Path("Qwen3.5-9B-Q4_K_M.gguf"),
+                url="https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF/resolve/main/Qwen3.5-9B-Q4_K_M.gguf",
+                size_bytes=5868826976,
+                sha256="e8dd94817e95d6c0939102049d068418269978377b13616c4726235e232841fe",
+            ),
+            ModelFileArtifact(
+                rel_path=Path("mmproj-BF16.gguf"),
+                url="https://huggingface.co/unsloth/Qwen3.5-9B-MTP-GGUF/resolve/main/mmproj-BF16.gguf",
+                size_bytes=921704928,
+                sha256="73c90471c349fec797f3969b59249259318ee3fa855a684da7ef35a46f063a9e",
+            ),
+        ),
+        publish_name="qwen3.5:9b-q4_k_m",
+        publish_digest="e8dd94817e95d6c0939102049d068418269978377b13616c4726235e232841fe",
+    ),
 }
 DEFAULT_MODEL = "qwen3.8-27b"
 
@@ -300,9 +328,11 @@ def pick_port() -> int:
 def build_args(port: int, name: str) -> list[str]:
     """Canonical invocation of a bundled model (Qwen3.x sampling per oqwen.sh)."""
     m = MODELS[name]
+    alias = m.publish_name or name
     args = [
         str(SERVER_BIN),
         "-m", str(m.directory / m.main_model),
+        "--alias", alias,
         "--host", HOST,
         "--port", str(port),
         "-ngl", "99",

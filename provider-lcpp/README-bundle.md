@@ -9,7 +9,7 @@ only an NVIDIA driver.
 - Linux x86_64 with glibc compatible with the Ubuntu-built binaries
 - NVIDIA driver installed (`libcuda.so.1` present in a standard path or nix store)
 - Python >= 3.10 (any distro python3 is fine; core offline wheels cover 3.10–3.15, otherwise installed from network)
-- Network access to `https://app.thinkfarm.net` at runtime
+- Network access to `https://app.thinkfarm.eu` at runtime
 
 ## Run
 
@@ -35,6 +35,8 @@ or the Model dropdown in the GUI (persisted to `~/.thinkfarm/custom.ini`):
 - `qwen3.8-27b/` (default) — `Qwen3.8-27B-UD-Q4_K_M.gguf`, `mmproj-BF16.gguf`,
   `mtp-Qwen3.8-27B-Q4_0.gguf` (MTP draft for speculative decoding)
 - `qwen3.6-35b/` — `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`, `mmproj-BF16.gguf`
+- `qwen3.5-9b/` — `Qwen3.5-9B-Q4_K_M.gguf`, `mmproj-BF16.gguf` (MTP module baked
+  into the GGUF for speculative decoding)
 
 By default each model downloads into and loads from its folder next to the app.
 To store weights elsewhere (e.g. a bigger disk), set `MODELS_PATH` in

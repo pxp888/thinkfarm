@@ -11,7 +11,7 @@ This document describes the data exchange protocol between a **provider** (a mac
 The provider opens a persistent WebSocket connection to:
 
 ```
-wss://app.thinkfarm.net/ws/provider/{provider_id}
+wss://app.thinkfarm.eu/ws/provider/{provider_id}
 ```
 
 - `{provider_id}` — a unique string identifying this provider instance (user-configured or auto-generated UUID).

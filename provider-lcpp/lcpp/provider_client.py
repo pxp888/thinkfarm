@@ -5,6 +5,7 @@ import json
 import logging
 import time
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 import httpx
@@ -39,6 +40,9 @@ class ProviderClient:
         self.last_inference_time = time.time()
         self.startup_model_loaded = False
         self.restarting_lcpp = False
+        # True while a recovery routine (restart_lcpp or handle_slow_jobs_routine) is in flight;
+        # prevents monitor_performance() from spawning a second concurrent recovery.
+        self._recovery_in_flight = False
 
     def log(self, message: str, level=logging.INFO):
         logger.log(level, message)
@@ -53,14 +57,6 @@ class ProviderClient:
         except Exception as e:
             self.log(f"Failed to load blacklist: {e}", logging.ERROR)
         return []
-
-    def save_blacklist(self):
-        try:
-            self.blacklist_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.blacklist_path, "w") as f:
-                json.dump(self.blacklisted_models, f)
-        except Exception as e:
-            self.log(f"Failed to save blacklist: {e}", logging.ERROR)
 
     def load_performance_baselines(self):
         try:
@@ -121,7 +117,7 @@ class ProviderClient:
                 n_ctx = (m.get("meta") or {}).get("n_ctx")
                 if not model_id or not n_ctx:
                     continue
-                name = os.path.basename(model_id)
+                name = model_id.replace("\\", "/").split("/")[-1]
                 if name.endswith(".gguf"):
                     name = name[:-5]
                 if self.config.model_name:
@@ -147,7 +143,7 @@ class ProviderClient:
                         for m in data:
                             model_id = m.get("id")
                             if model_id:
-                                name = os.path.basename(model_id)
+                                name = model_id.replace("\\", "/").split("/")[-1]
                                 if name.endswith(".gguf"):
                                     name = name[:-5]
                                 m_dict = {
@@ -262,9 +258,14 @@ class ProviderClient:
         await self.get_performance_data()
         
         while self.running:
+            # Recovery (restart_lcpp) owns reconnection until it reports back; while llama.cpp is
+            # restarting, hold the loop here instead of opening a new WebSocket or stopping.
+            if self.restarting_lcpp:
+                await asyncio.sleep(2)
+                continue
+
             if not self.startup_model_loaded:
                 self.startup_model_loaded = True
-                asyncio.create_task(self.load_most_desirable_model())
                 asyncio.create_task(self.ensure_performance_baselines())
 
             conn_error = None
@@ -396,19 +397,10 @@ class ProviderClient:
                     max_slots = max(1, getattr(self.config, "slots", 1))
                     current_active = len(self.active_jobs)
                     
-                    delay = 0.0
                     if current_active >= max_slots:
-                        # Fully busy -> 2s delay
-                        delay += 2.0
-                    # Partially busy -> no delay
-                        
-                    # Model unloaded -> 2s delay
-                    if local_model_name not in self.loaded_models:
-                        delay += 2.0
-                    
-                    if delay > 0:
-                        self.log(f"Delaying acceptance of job {job_id} by {delay:.1f}s (active: {current_active}/{max_slots}, loaded: {local_model_name in self.loaded_models})")
-                        await asyncio.sleep(delay)
+                        # Fully busy -> 2s delay so other providers can accept first
+                        self.log(f"Delaying acceptance of job {job_id} by 2.0s (active: {current_active}/{max_slots})")
+                        await asyncio.sleep(2.0)
                         
                     if self.soft_stopping or not self.websocket:
                         return
@@ -427,6 +419,11 @@ class ProviderClient:
                         self.log(f"Failed to send acceptance for job {job_id}: {e}", logging.WARNING)
 
                 asyncio.create_task(process_acceptance())
+            elif not digest:
+                self.log(f"Ignoring job {job_id}: advertisement carries no usable digest (model field: {msg.get('model')!r}).", logging.WARNING)
+            else:
+                available = [m.get("digest") for m in probed_models]
+                self.log(f"Ignoring job {job_id}: digest {digest} not served by this provider (available digests: {available}; model field: {msg.get('model')!r}).", logging.INFO)
                 
         elif msg_type == "job_assigned":
             job_id = msg.get("job_id")
@@ -434,18 +431,6 @@ class ProviderClient:
             body = msg.get("body")
             digest = msg.get("digest")
             
-            # Ensure the model gets loaded in the background if it's not already loaded
-            if digest:
-                is_embed_endpoint = endpoint in ("embed", "embeddings")
-                probed_models = await self.get_local_models()
-                matched = next((m for m in probed_models if m.get("digest") == digest), None)
-                if matched:
-                    local_name = matched.get("name")
-                    using_custom = not is_embed_endpoint
-                    actual_model = f"thinkfarm-{local_name}" if using_custom and local_name else local_name
-                    if local_name and local_name not in self.loaded_models and actual_model not in self.loaded_models:
-                        asyncio.create_task(self.keep_model_loaded(actual_model, is_embed_endpoint))
-
             # Start job in background task
             self.current_jobs += 1
             task = asyncio.create_task(self.execute_job(job_id, endpoint, body, digest=digest))
@@ -465,21 +450,9 @@ class ProviderClient:
 
     async def execute_job(self, job_id: str, endpoint: str, body: dict, digest: str = None):
         self.last_inference_time = time.time()
-        # Determine local model mapping via digest
+        # llama.cpp serves a single pre-loaded model and ignores the request's
+        # model field, so pass it through unchanged.
         requested_model = body.get("model") if body else None
-        is_embed_endpoint = endpoint in ("embed", "embeddings")
-
-        probed_models = await self.get_local_models()
-        matched = next((m for m in probed_models if digest and m.get("digest") == digest), None)
-        local_name = matched.get("name") if matched else requested_model
-
-        using_custom = not is_embed_endpoint
-        actual_model = f"thinkfarm-{local_name}" if using_custom and local_name else local_name
-        
-        if using_custom and requested_model and actual_model:
-            body["model"] = actual_model
-            if actual_model != requested_model:
-                self.log(f"Mapping requested model '{requested_model}' to local custom model '{actual_model}'")
 
         is_ollama_format = endpoint in ("chat", "generate", "embed", "embeddings", "show")
         
@@ -510,7 +483,8 @@ class ProviderClient:
                 "job_id": job_id,
                 "eval_count": 0,
                 "prompt_eval_count": 0,
-                "is_busy": len(self.active_jobs) >= getattr(self.config, "slots", 1)
+                # Current job is still registered in active_jobs when this message is built; count only others.
+                "is_busy": max(0, len(self.active_jobs) - 1) >= getattr(self.config, "slots", 1)
             }))
             return
         else:
@@ -652,6 +626,12 @@ class ProviderClient:
                                     except Exception:
                                         pass
                                 combined_data = "".join(translated_chunks)
+                            elif "v1/" in lcpp_path and requested_model:
+                                combined_data = re.sub(
+                                    r"(\"model\"\s*:\s*)\"(?:\\.|[^\"\\])*\"",
+                                    r"\g<1>" + json.dumps(requested_model),
+                                    combined_data
+                                )
                             
                             if combined_data:
                                 await self.websocket.send(json.dumps({
@@ -718,6 +698,12 @@ class ProviderClient:
                                 except Exception:
                                     pass
                             combined_data = "".join(translated_chunks)
+                        elif "v1/" in lcpp_path and requested_model:
+                            combined_data = re.sub(
+                                r"(\"model\"\s*:\s*)\"(?:\\.|[^\"\\])*\"",
+                                r"\g<1>" + json.dumps(requested_model),
+                                combined_data
+                            )
                         
                         # Send final done chunk for Ollama format if streaming
                         if is_ollama_format and "v1/" in lcpp_path:
@@ -815,6 +801,8 @@ class ProviderClient:
                             translated_resp = resp_json
                     else:
                         translated_resp = resp_json
+                        if requested_model and isinstance(translated_resp, dict) and "model" in translated_resp:
+                            translated_resp["model"] = requested_model
                     
                     await self.websocket.send(json.dumps({
                         "type": "chunk",
@@ -841,7 +829,8 @@ class ProviderClient:
                 "prompt_eval_count": prompt_eval_count,
                 "eval_count": eval_count,
                 "total_duration": duration_ns,
-                "is_busy": len(self.active_jobs) >= getattr(self.config, "slots", 1)
+                # Current job is still registered in active_jobs when this message is built; count only others.
+                "is_busy": max(0, len(self.active_jobs) - 1) >= getattr(self.config, "slots", 1)
             }
             await self.websocket.send(json.dumps(done_msg))
             
@@ -884,7 +873,13 @@ class ProviderClient:
             sanity_success = await self.run_sanity_check(model)
             if not sanity_success:
                 self.log(f"Sanity check failed for model {model}! Triggering llama.cpp restart...", logging.CRITICAL)
-                asyncio.create_task(self.restart_lcpp())
+                # Guard against concurrent recovery routines; the single-threaded event loop makes
+                # this check-then-set safe without a lock. The wrapper clears it on every exit path.
+                if self._recovery_in_flight:
+                    self.log("Recovery already in progress; skipping duplicate llama.cpp restart.", logging.WARNING)
+                else:
+                    self._recovery_in_flight = True
+                    asyncio.create_task(self._restart_lcpp_guarded())
             return
             
         # 2. Slope Monitor
@@ -909,7 +904,14 @@ class ProviderClient:
                 if len(slow_jobs) >= 3 and all(h[0] < threshold for h in slow_jobs[-3:]):
                     avg_slow_tps = sum(h[0] for h in slow_jobs[-3:]) / 3
                     self.log(f"Slow jobs detected for model {model} (avg throughput: {avg_slow_tps:.2f} t/s below threshold {threshold:.2f} t/s).")
-                    asyncio.create_task(self.handle_slow_jobs_routine(model, avg_slow_tps))
+                    # Guard against concurrent recovery routines; the single-threaded event loop makes
+                    # this check-then-set safe without a lock. The wrapper clears it on every exit path,
+                    # holding it across the routine's inline restart_lcpp() await.
+                    if self._recovery_in_flight:
+                        self.log("Recovery already in progress; skipping duplicate slow-jobs routine.", logging.WARNING)
+                    else:
+                        self._recovery_in_flight = True
+                        asyncio.create_task(self._slow_jobs_routine_guarded(model, avg_slow_tps))
 
     async def run_sanity_check(self, model: str) -> bool:
         try:
@@ -924,12 +926,6 @@ class ProviderClient:
                 return resp.status_code == 200
         except Exception:
             return False
-
-    async def keep_model_loaded(self, model_name: str, is_embed: bool = False):
-        self.loaded_models.add(model_name)
-
-    async def get_raw_loaded_models(self) -> list:
-        return list(await self.get_loaded_models())
 
     async def run_heartbeat_check(self):
         if not self.running or self.current_jobs > 0:
@@ -1021,22 +1017,13 @@ class ProviderClient:
             else:
                 self.log(f"Failed to measure performance baseline for {name}.", logging.WARNING)
 
-    async def load_most_desirable_model(self):
-        if not self.running or self.current_jobs > 0 or getattr(self, "soft_stopping", False):
-            return
-        if await self.get_raw_loaded_models():
-            return
-
-        self.log("llama.cpp serves a single pre-loaded model. Querying local model status...")
+    async def _restart_lcpp_guarded(self) -> str:
+        # Holds the recovery guard across restart_lcpp() and clears it on every exit path
+        # (success return, error return, exception), so a second bad job cannot double-restart.
         try:
-            local_models = await self.get_local_models()
-            for m in local_models:
-                name = m.get("name")
-                if name:
-                    self.loaded_models.add(name)
-            self.log(f"Active loaded models: {list(self.loaded_models)}")
-        except Exception as e:
-            self.log(f"Failed to query local models: {e}", logging.WARNING)
+            return await self.restart_lcpp()
+        finally:
+            self._recovery_in_flight = False
 
     async def restart_lcpp(self) -> str:
         self.log("Initiating llama.cpp restart procedure...")
@@ -1190,49 +1177,67 @@ class ProviderClient:
         self.restarting_lcpp = False
         return "online"
 
+    async def _slow_jobs_routine_guarded(self, model: str, slow_jobs_tps: float):
+        # Holds the recovery guard across the whole routine (including its inline restart_lcpp()
+        # await) and clears it on every exit path; clearing inside restart_lcpp would open a
+        # re-entry window while this routine is still draining.
+        try:
+            await self.handle_slow_jobs_routine(model, slow_jobs_tps)
+        finally:
+            self._recovery_in_flight = False
+
     async def handle_slow_jobs_routine(self, model: str, slow_jobs_tps: float):
-        self.log(f"Handling slow jobs detected for model {model}. Initiating graceful disconnect...")
+        self.log(f"Handling slow jobs detected for model {model}. Waiting for active jobs to finish...")
         self.soft_stopping = True
         if self.status_callback:
             self.status_callback("Stopping")
-            
-        # Wait for current active jobs to finish
+
+        # Wait for current active jobs to finish (websocket stays open during drain)
         while self.current_jobs > 0:
             await asyncio.sleep(0.5)
-            
-        if self.websocket:
-            self.log("Closing WebSocket connection gracefully.")
-            await self.websocket.close()
-            self.websocket = None
-            
-        # Compare the slope value of the 'slow' jobs with baseline
+
+        # Evaluate the branches in memory before touching the websocket, so run()'s
+        # reconnect/stop logic cannot race ahead and stop the provider mid-restart.
         baseline_slope = None
         baseline_info = self.performance_baselines.get(model)
         if baseline_info and "slope" in baseline_info:
             baseline_slope = baseline_info["slope"]
-            
-        if baseline_slope is not None:
-            threshold = 0.7 * baseline_slope
-            if slow_jobs_tps >= threshold:
-                self.log(f"Slow jobs performance ({slow_jobs_tps:.2f} t/s) is comparable to baseline ({baseline_slope:.2f} t/s). Blacklisting model {model}...")
-                if model not in self.blacklisted_models:
-                    self.blacklisted_models.append(model)
-                if model in self.loaded_models:
-                    self.loaded_models.remove(model)
-                self.save_blacklist()
-                await self.send_status(force_full=True)
-                
-                # Re-allow running and reconnect
-                self.soft_stopping = False
+
+        degraded = (baseline_slope is not None) and slow_jobs_tps < 0.7 * baseline_slope
+
+        if not degraded:
+            # Healthy vs own baseline but below the published requirement (peak/3), or no
+            # baseline recorded. A restart will not fix this; alert the user and stop.
+            peak = ((self.performance_data or {}).get(model) or {}).get("peak", 0)
+            if peak:
+                msg = f"{model} cannot meet required throughput ({slow_jobs_tps:.2f} t/s < {peak / 3:.2f} t/s). Provider stopping."
             else:
-                self.log(f"Slow jobs performance ({slow_jobs_tps:.2f} t/s) is worse than baseline ({baseline_slope:.2f} t/s). Hardware issue likely, initiating restart...", logging.ERROR)
-                await self.restart_lcpp()
-        else:
-            self.log(f"No baseline data for {model} to compare slow jobs. Defaulting to blacklisting.", logging.WARNING)
-            if model not in self.blacklisted_models:
-                self.blacklisted_models.append(model)
-            if model in self.loaded_models:
-                self.loaded_models.remove(model)
-            self.save_blacklist()
-            await self.send_status(force_full=True)
+                msg = f"{model} is below the required performance threshold ({slow_jobs_tps:.2f} t/s) and no published peak is known. Provider stopping."
+            self.log(msg, logging.CRITICAL)
+            if self.status_callback:
+                self.status_callback(f"Error: {msg}")
+            if self.websocket:
+                await self.websocket.close()
+                self.websocket = None
+            self.running = False
+            return
+
+        # Degraded vs own baseline -> something local is wrong. Try a restart.
+        self.log(f"Throughput {slow_jobs_tps:.2f} t/s is below 70% of own baseline ({baseline_slope:.2f} t/s). Local fault likely; restarting llama.cpp...", logging.ERROR)
+        # Flag the restart BEFORE closing the websocket so run() does not stop mid-restart.
+        self.restarting_lcpp = True
+        if self.websocket:
+            await self.websocket.close()
+            self.websocket = None
+
+        result = await self.restart_lcpp()
+        if result == "online":
+            # restart_lcpp already re-measured a test prompt against the 0.7x baseline.
             self.soft_stopping = False
+            self.log("llama.cpp recovered after restart. Resuming service.")
+        else:
+            # restart_lcpp already reported the specific failure via status_callback.
+            self.log(f"Restart did not recover llama.cpp (result: {result}). Provider stopping; user intervention required.", logging.CRITICAL)
+            if self.status_callback:
+                self.status_callback("Error: performance recovery failed - provider stopped")
+            self.running = False

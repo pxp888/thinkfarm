@@ -64,7 +64,7 @@ All of these endpoints forward the **entire request body** to the corresponding 
 
 ## 3. Client-to-Server Protocol (HTTP → Central Server)
 
-All communication from the consumer to the central server occurs over HTTPS at a configured URL (default: `https://app.thinkfarm.net`). The central server exposes both Ollama-compatible paths (`/api/*`) and OpenAI-compatible paths (`/v1/*`).
+All communication from the consumer to the central server occurs over HTTPS at a configured URL (default: `https://app.thinkfarm.eu`). The central server exposes both Ollama-compatible paths (`/api/*`) and OpenAI-compatible paths (`/v1/*`).
 
 ### 3.1 Model Catalog Requests
 

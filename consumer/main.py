@@ -36,7 +36,7 @@ def load_config():
         # Running in normal Python
         env_path = os.path.join(os.path.dirname(__file__), '.env')
         load_dotenv(env_path)
-    SERVER_URL = os.environ.get("SERVER_URL", "https://app.thinkfarm.net")
+    SERVER_URL = os.environ.get("SERVER_URL", "https://app.thinkfarm.eu")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

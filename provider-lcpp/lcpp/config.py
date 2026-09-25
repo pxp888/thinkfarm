@@ -9,14 +9,14 @@ class ConfigManager:
     _SECTION_CONSUMER = "consumer"
 
     def __init__(self, workspace_dir=None):
-        self.workspace_dir = Path(workspace_dir or "/home/pxperrine/Documents/code/unity")
+        self.workspace_dir = Path(workspace_dir or Path(__file__).resolve().parent)
         self.env_path = self.workspace_dir / ".env"
         self.config_dir = Path(os.path.expanduser("~/.thinkfarm"))
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = self.config_dir / "custom.ini"
 
         # Defaults – never read from disk; only the loaded values survive
-        self.server_url: str = "https://app.thinkfarm.net"
+        self.server_url: str = "https://app.thinkfarm.eu"
         self.provider_id: str = str(uuid.uuid4())
         self.consumer_id: str = ""
         self.port: int = 11435
@@ -103,7 +103,7 @@ class ConfigManager:
         except ValueError:
             self.slots = 1
 
-        self.server_url = env_vals.get("CENTRAL_SERVER_URL") or "https://app.thinkfarm.net"
+        self.server_url = env_vals.get("CENTRAL_SERVER_URL") or "https://app.thinkfarm.eu"
         self.provider_id = v(self._SECTION_PROVIDER, "PROVIDER_ID", str(uuid.uuid4())) or self.provider_id
         self.consumer_id = v(self._SECTION_CONSUMER, "CONSUMER_ID", "") or ""
         self.port = int(v(self._SECTION_CONSUMER, "CLIENT_PORT", "11435") or "11435")
