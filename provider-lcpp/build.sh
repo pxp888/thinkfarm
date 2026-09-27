@@ -189,8 +189,8 @@ build_variant() {
     prepare_wheelhouse "$os" "$stage/wheelhouse"
 
     # 4. Model placeholders
-    mkdir -p "$stage/qwen3.8-27b" "$stage/qwen3.6-35b" "$stage/qwen3.5-9b"
-    touch "$stage/qwen3.8-27b/.gitkeep" "$stage/qwen3.6-35b/.gitkeep" "$stage/qwen3.5-9b/.gitkeep"
+    mkdir -p "$stage/qwen3.8-27b" "$stage/qwen3.6-35b" "$stage/qwen3.5-9b" "$stage/spark-x2.5-4b"
+    touch "$stage/qwen3.8-27b/.gitkeep" "$stage/qwen3.6-35b/.gitkeep" "$stage/qwen3.5-9b/.gitkeep" "$stage/spark-x2.5-4b/.gitkeep"
 
     # 5. Create final archive
     echo "[build] Packaging $bundle..."

@@ -37,6 +37,7 @@ or the Model dropdown in the GUI (persisted to `~/.thinkfarm/custom.ini`):
 - `qwen3.6-35b/` — `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`, `mmproj-BF16.gguf`
 - `qwen3.5-9b/` — `Qwen3.5-9B-Q4_K_M.gguf`, `mmproj-BF16.gguf` (MTP module baked
   into the GGUF for speculative decoding)
+- `spark-x2.5-4b/` — `Spark-X2.5-4B-Q8_0.gguf`
 
 By default each model downloads into and loads from its folder next to the app.
 To store weights elsewhere (e.g. a bigger disk), set `MODELS_PATH` in

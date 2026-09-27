@@ -1,0 +1,3 @@
+XHToken/Spark-X2.5-4B-GGUF
+
+https://huggingface.co/XHToken/Spark-X2.5-4B-GGUF/resolve/main/Spark-X2.5-4B-Q8_0.gguf?download=true
