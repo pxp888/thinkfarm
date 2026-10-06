@@ -33,7 +33,7 @@ fi
 
 UPSTREAM="upstream-bins"
 WHEEL_CACHE_ROOT=".wheel-cache"
-VERSION="b11125"
+VERSION="b11401"
 PROVIDER_VERSION=$(sed -n -E "s/^PROVIDER_VERSION[[:space:]]*=[[:space:]]*['\"]?([^ '\"#]+).*/\1/p" gui.py | head -n 1)
 if [ -z "$PROVIDER_VERSION" ]; then
     echo "[build] ERROR: Could not extract PROVIDER_VERSION from gui.py" >&2
@@ -189,8 +189,8 @@ build_variant() {
     prepare_wheelhouse "$os" "$stage/wheelhouse"
 
     # 4. Model placeholders
-    mkdir -p "$stage/qwen3.8-27b" "$stage/qwen3.6-35b" "$stage/qwen3.5-9b" "$stage/spark-x2.5-4b"
-    touch "$stage/qwen3.8-27b/.gitkeep" "$stage/qwen3.6-35b/.gitkeep" "$stage/qwen3.5-9b/.gitkeep" "$stage/spark-x2.5-4b/.gitkeep"
+    mkdir -p "$stage/qwen3.8-27b" "$stage/qwen3.6-35b" "$stage/qwen3.5-9b" "$stage/spark-x2.5-4b" "$stage/nemotron-3.5-30b"
+    touch "$stage/qwen3.8-27b/.gitkeep" "$stage/qwen3.6-35b/.gitkeep" "$stage/qwen3.5-9b/.gitkeep" "$stage/spark-x2.5-4b/.gitkeep" "$stage/nemotron-3.5-30b/.gitkeep"
 
     # 5. Create final archive
     echo "[build] Packaging $bundle..."

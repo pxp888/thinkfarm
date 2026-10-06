@@ -195,6 +195,26 @@ MODELS = {
         publish_name="spark-x2.5:4b-q8_0",
         publish_digest="5c2c3c190e4337e1016b8593ca8e26e8b18c972200b107385d4ec61a25d9dea2",
     ),
+    "nemotron-3.5-30b": ModelSpec(
+        label="Nemotron 3.5 30B-A3B (MoE)",
+        directory=ROOT / "nemotron-3.5-30b",
+        main_model=Path("Nemotron-3.5-Lightning-30B-A3B-NVFP4.gguf"),
+        extra_args=(
+            ("-fa", "on"),
+            ("--cache-type-k", "q4_0"),
+            ("--cache-type-v", "q4_0"),
+        ),
+        downloads=(
+            ModelFileArtifact(
+                rel_path=Path("Nemotron-3.5-Lightning-30B-A3B-NVFP4.gguf"),
+                url="https://huggingface.co/tngtech/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-GGUF/resolve/main/Nemotron-3.5-Lightning-30B-A3B-NVFP4.gguf",
+                size_bytes=18492469952,
+                sha256="de8e437c5908da82a4d8f94bd90e307d80aeda30642223cef298bf0f3e46e577",
+            ),
+        ),
+        publish_name="nemotron-3.5:30b-a3b-nvfp4",
+        publish_digest="de8e437c5908da82a4d8f94bd90e307d80aeda30642223cef298bf0f3e46e577",
+    ),
 }
 DEFAULT_MODEL = "qwen3.8-27b"
 
@@ -223,12 +243,23 @@ def parse_model_arg(argv: list[str]) -> str | None:
     return None
 
 
+MODEL_ALIASES: dict[str, str] = {
+    "nemotron": "nemotron-3.5-30b",
+    "nemotron-3.5": "nemotron-3.5-30b",
+    "nemotron-3.5-30b-a3b": "nemotron-3.5-30b",
+    "nemotron-3.5-lightning": "nemotron-3.5-30b",
+    "nemotron-3.5-lightning-30b": "nemotron-3.5-30b",
+    "nemotron-30b": "nemotron-3.5-30b",
+}
+
+
 def resolve_model(cli_value: str | None = None, env=None, saved: str = "") -> str:
     """Pick which bundled model to load; unknown names are fatal (a node should
     never silently run a model it wasn't told to)."""
     for cand in (cli_value, os.environ.get("THINKFARM_MODEL"), saved):
         if not cand:
             continue
+        cand = MODEL_ALIASES.get(cand, cand)
         if cand in MODELS:
             return cand
         print(f"[app] ERROR: unknown model '{cand}'. Valid models: {', '.join(MODELS)}", file=sys.stderr)
@@ -343,8 +374,11 @@ def pick_port() -> int:
         return s.getsockname()[1]
 
 
-def build_args(port: int, name: str) -> list[str]:
-    """Canonical invocation of a bundled model (Qwen3.x sampling per oqwen.sh)."""
+def build_args(port: int, name: str, slots: int = 1) -> list[str]:
+    """Canonical invocation of a bundled model (Qwen3.x sampling per oqwen.sh).
+
+    `slots` maps to llama-server's --parallel; each slot gets its own KV cache,
+    so VRAM usage grows with it."""
     m = MODELS[name]
     alias = m.publish_name or name
     args = [
@@ -354,16 +388,20 @@ def build_args(port: int, name: str) -> list[str]:
         "--host", HOST,
         "--port", str(port),
         "-ngl", "99",
-        "--parallel", "1",
         "--jinja",
-        "--reasoning-format", "deepseek",
-        "--temp", "0.8",
-        "--top-p", "0.9",
-        "--top-k", "40",
-        "--min-p", "0.0",
-        "--repeat-penalty", "1.1",
-        "--repeat-last-n", "64",
+        "--parallel", str(max(1, int(slots))),
     ]
+    # Qwen3.x-specific reasoning format and sampling hyperparameters
+    if "qwen" in name:
+        args += [
+            "--reasoning-format", "deepseek",
+            "--temp", "0.8",
+            "--top-p", "0.9",
+            "--top-k", "40",
+            "--min-p", "0.0",
+            "--repeat-penalty", "1.1",
+            "--repeat-last-n", "64",
+        ]
     if m.mmproj is not None:
         args += ["--mmproj", str(m.directory / m.mmproj)]
     for flag, value in m.extra_args:
@@ -394,14 +432,15 @@ def find_driver_dirs() -> list[str]:
 class LlamaServer:
     """Owns the child llama-server process."""
 
-    def __init__(self, port: int, model_name: str = DEFAULT_MODEL):
+    def __init__(self, port: int, model_name: str = DEFAULT_MODEL, slots: int = 1):
         self.port = port
         self.model_name = model_name
+        self.slots = max(1, int(slots))
         self.proc: subprocess.Popen | None = None
         self.log_file = None
 
     def start(self):
-        args = build_args(self.port, self.model_name)
+        args = build_args(self.port, self.model_name, self.slots)
         LOG_DIR.mkdir(exist_ok=True)
         env = dict(os.environ)
         # Configure shared library / DLL search paths
@@ -425,7 +464,7 @@ class LlamaServer:
         self.log_file.write(
             b"\n=== " + str(time.strftime("%Y-%m-%d %H:%M:%S")).encode() + b" start ===\n"
         )
-        print(f"[app] Starting llama-server on {HOST}:{self.port} (model: {MODELS[self.model_name].label})")
+        print(f"[app] Starting llama-server on {HOST}:{self.port} (model: {MODELS[self.model_name].label}, slots: {self.slots})")
         print(f"[app]   args: {' '.join(args)}")
         print(f"[app]   log:  {SERVER_LOG}")
 
@@ -538,7 +577,7 @@ def main():
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, lambda *_: _sigint_handler())
 
-    runner = LlamaServer(port, model_name)
+    runner = LlamaServer(port, model_name, config.slots)
 
     async def run():
         runner.start()

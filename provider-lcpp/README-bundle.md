@@ -38,6 +38,7 @@ or the Model dropdown in the GUI (persisted to `~/.thinkfarm/custom.ini`):
 - `qwen3.5-9b/` — `Qwen3.5-9B-Q4_K_M.gguf`, `mmproj-BF16.gguf` (MTP module baked
   into the GGUF for speculative decoding)
 - `spark-x2.5-4b/` — `Spark-X2.5-4B-Q8_0.gguf`
+- `nemotron-3.5-30b/` — `Nemotron-3.5-Lightning-30B-A3B-NVFP4.gguf`
 
 By default each model downloads into and loads from its folder next to the app.
 To store weights elsewhere (e.g. a bigger disk), set `MODELS_PATH` in
@@ -58,5 +59,10 @@ server and uses it to gate job acceptance.
 ## Config
 
 Read from `~/.thinkfarm/custom.ini` (provider id, slots, etc.) and optional `.env`
-next to the app. Logs go to `logs/llama-server.log`. Stop: **Exit** from the tray
+next to the app.
+
+Slots: set `SLOTS = N` under `[provider]` in `custom.ini` (default 1). It controls
+both how many concurrent jobs the node accepts and llama-server's `--parallel`.
+Each slot needs its own KV cache, so raise it only if your VRAM has room. Change
+takes effect on restart. Logs go to `logs/llama-server.log`. Stop: **Exit** from the tray
 menu (GUI) or Ctrl+C (`--headless`) — the llama-server child is terminated cleanly.
