@@ -17,38 +17,10 @@ Think Farm consists of two roles:
 
 Think Farm has three moving parts: a **consumer app** that presents network models as a local Ollama/OpenAI API, a **central server** (`app.thinkfarm.net`) that routes inference jobs, and **provider nodes** that run the actual inference on their own hardware. The provider app bundles its inference engine directly — it spawns and supervises its own `llama-server` (llama.cpp) child process and executes every job locally; it is not a proxy for Ollama or any other pre-existing runner.
 
-```mermaid
-flowchart TB
-    ClientApps["Client Apps<br/>(OpenAI / Ollama compatible)"] -->|HTTP · localhost:11435| ConsumerProxy
-    CloudClients["Direct cloud clients & OpenRouter<br/>fail-fast routing, 429 backpressure"]
 
-    subgraph ConsumerNode["Consumer Node (consumer/)"]
-        ConsumerProxy["Local API Proxy — FastAPI on port 11435<br/>Ollama: /api/chat · /api/generate · /api/embed …<br/>OpenAI: /v1/chat/completions · /v1/models …"]
-    end
+![Architecture](assets/thinkfarmArch.jpeg)
 
-    subgraph CentralServer["Central Server (app.thinkfarm.net) — stateless FastAPI instances"]
-        REST["REST Inference API<br/>consumer-ID auth · num_ctx estimation"]
-        Router["Job Router<br/>model alias → digest resolution<br/>context-aware provider selection (Redis ZSETs)<br/>dispatch → accept race → assign<br/>timeouts · cancellation · failover retries"]
-        State[("Live routing state: Redis/Valkey cluster<br/>Job history & analytics: PostgreSQL")]
-        REST --> Router
-        Router <--> State
-    end
 
-    ConsumerProxy <-->|"HTTPS + X-Consumer-ID, response streamed back"| REST
-    CloudClients -->|HTTPS| REST
-
-    subgraph ProviderNode["Provider Node (provider-lcpp/)"]
-        Daemon["Provider daemon / GUI (app.py, gui.py)<br/>WebSocket client · model & process supervisor"]
-        LlamaServer["Bundled llama-server child process<br/>(llama.cpp + CUDA 13 runtime)<br/>runs inference on this machine's GPU"]
-        Weights[("GGUF weights<br/>base + mmproj + MTP draft")]
-        Daemon -->|"spawn · supervise · local HTTP jobs"| LlamaServer
-        LlamaServer --- Weights
-    end
-
-    Router -->|"job dispatch & assignment (model, endpoint, request body)"| Daemon
-    Daemon -->|"status heartbeats · accept · token chunks · job_done"| Router
-    LlamaServer -->|"streaming tokens"| Daemon
-```
 
 **The central server.** It runs as multiple stateless FastAPI instances sharing live routing state in a Redis/Valkey cluster: provider status, per-model idle sets scored by context window, and active-job tracking. Completed jobs (provider, model, token counts, duration) are persisted to PostgreSQL for history, performance analytics, and revenue reporting. The same REST inference API also fronts Think Farm's hosted models for direct cloud clients — including OpenRouter, where capacity is advertised per slot (RPM/TPM scaled by an operator-set capacity factor) and the server fails fast with `429` backpressure instead of queueing when no provider is idle.
 
