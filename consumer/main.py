@@ -179,7 +179,7 @@ async def get_ps(request: Request):
 def _add_num_ctx_if_missing(body: dict) -> dict:
     """
     Check if num_ctx is present in the request options.
-    If missing or empty, estimate a safe default based on request content.
+    If missing or empty, estimate a realistic context requirement based on prompt tokens + response headroom.
     """
     if not isinstance(body, dict):
         return body
@@ -187,66 +187,114 @@ def _add_num_ctx_if_missing(body: dict) -> dict:
     options = body.get("options")
     if not isinstance(options, dict):
         options = {}
-    
+
     num_ctx = options.get("num_ctx")
-    
+
     # If num_ctx is present and > 0, we don't touch it.
     if isinstance(num_ctx, int) and num_ctx > 0:
         return body
 
-    # Collect text to estimate length
-    text_parts = []
-    
-    # 1. Generate/Embeddings prompt
-    prompt = body.get("prompt")
-    if isinstance(prompt, str):
-        text_parts.append(prompt)
-    elif isinstance(prompt, list):
-        for p in prompt:
-            if isinstance(p, str):
-                text_parts.append(p)
-                
-    # 2. Chat messages
+    text_chars = 0
+
+    # 1. Chat messages
     messages = body.get("messages")
     if isinstance(messages, list):
         for msg in messages:
             if isinstance(msg, dict):
                 content = msg.get("content")
                 if isinstance(content, str):
-                    text_parts.append(content)
+                    text_chars += len(content)
                 elif isinstance(content, list):
                     for item in content:
-                        if isinstance(item, dict) and item.get("type") == "text":
-                            text_parts.append(item.get("text", ""))
+                        if isinstance(item, dict):
+                            t = item.get("text")
+                            if isinstance(t, str):
+                                text_chars += len(t)
+                            if item.get("type") in ("image_url", "image") or "image_url" in item:
+                                text_chars += 3800  # ~1000 vision tokens per image
+                        elif isinstance(item, str):
+                            text_chars += len(item)
 
-    if not text_parts:
+                # Ollama multimodal images list
+                images = msg.get("images")
+                if isinstance(images, list):
+                    text_chars += len(images) * 3800
+
+                tool_calls = msg.get("tool_calls")
+                if isinstance(tool_calls, list):
+                    for tc in tool_calls:
+                        if isinstance(tc, dict):
+                            fn = tc.get("function")
+                            if isinstance(fn, dict):
+                                name = fn.get("name")
+                                if isinstance(name, str):
+                                    text_chars += len(name)
+                                args = fn.get("arguments")
+                                if isinstance(args, str):
+                                    text_chars += len(args)
+
+    # 2. Generate/Embeddings prompt
+    prompt = body.get("prompt")
+    if isinstance(prompt, str):
+        text_chars += len(prompt)
+    elif isinstance(prompt, list):
+        for p in prompt:
+            if isinstance(p, str):
+                text_chars += len(p)
+
+    # 3. System prompt
+    system = body.get("system")
+    if isinstance(system, str):
+        text_chars += len(system)
+    elif isinstance(system, list):
+        for s in system:
+            if isinstance(s, str):
+                text_chars += len(s)
+            elif isinstance(s, dict) and isinstance(s.get("text"), str):
+                text_chars += len(s["text"])
+
+    # 4. Tool definitions
+    tools = body.get("tools")
+    if tools:
+        try:
+            text_chars += len(json.dumps(tools))
+        except Exception:
+            pass
+
+    if text_chars == 0:
         return body
 
-    full_text = "".join(text_parts)
-    
-    # Estimate tokens: 1 token ~= 3 characters (conservative)
-    estimated_prompt_tokens = len(full_text) // 3
-    
-    # Buffer for response
-    response_buffer = 2048
+    # 1 token ~= 3.8 - 4.0 chars
+    estimated_prompt_tokens = int(text_chars / 3.8)
+
+    # Response buffer: default 4096, capped at 8192
+    response_buffer = 4096
+    client_max = None
     if isinstance(options.get("num_predict"), int) and options["num_predict"] > 0:
-        response_buffer = options["num_predict"]
+        client_max = options["num_predict"]
     elif isinstance(body.get("max_tokens"), int) and body["max_tokens"] > 0:
-        response_buffer = body["max_tokens"]
-        
+        client_max = body["max_tokens"]
+    elif isinstance(body.get("max_completion_tokens"), int) and body["max_completion_tokens"] > 0:
+        client_max = body["max_completion_tokens"]
+
+    if client_max is not None:
+        if client_max < response_buffer:
+            response_buffer = client_max
+        else:
+            response_buffer = min(client_max, 8192)
+
     required_ctx = estimated_prompt_tokens + response_buffer
-    
+
     # Clamp floor and round
     if required_ctx < 4096:
         final_ctx = 4096
     else:
-        # Round up to nearest 1024
         final_ctx = ((required_ctx + 1023) // 1024) * 1024
-        
+
     if "options" not in body or not isinstance(body["options"], dict):
         body["options"] = {}
     body["options"]["num_ctx"] = final_ctx
-    
+
     return body
 
 
