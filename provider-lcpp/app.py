@@ -177,23 +177,23 @@ MODELS = {
         publish_name="qwen3.5:9b-q4_k_m",
         publish_digest="e8dd94817e95d6c0939102049d068418269978377b13616c4726235e232841fe",
     ),
-    "spark-x2.5-4b": ModelSpec(
-        label="Spark X2.5 4B",
-        directory=ROOT / "spark-x2.5-4b",
-        main_model=Path("Spark-X2.5-4B-Q8_0.gguf"),
+    "spark-x2.6-4b": ModelSpec(
+        label="Spark X2.6 4B",
+        directory=ROOT / "spark-x2.6-4b",
+        main_model=Path("Spark-X2.6-4B-Q8_0.gguf"),
         extra_args=(
             ("-fa", "on"),
         ),
         downloads=(
             ModelFileArtifact(
-                rel_path=Path("Spark-X2.5-4B-Q8_0.gguf"),
-                url="https://huggingface.co/XHToken/Spark-X2.5-4B-GGUF/resolve/main/Spark-X2.5-4B-Q8_0.gguf",
-                size_bytes=4375021152,
-                sha256="5c2c3c190e4337e1016b8593ca8e26e8b18c972200b107385d4ec61a25d9dea2",
+                rel_path=Path("Spark-X2.6-4B-Q8_0.gguf"),
+                url="https://huggingface.co/XHToken/Spark-X2.6-4B-GGUF/resolve/main/Spark-X2.6-4B-Q8_0.gguf",
+                size_bytes=4375021824,
+                sha256="145c2aa606820663f26ad530b8fc141ed885e2e9ca29f9be7c3bfe8931d58b81",
             ),
         ),
-        publish_name="spark-x2.5:4b-q8_0",
-        publish_digest="5c2c3c190e4337e1016b8593ca8e26e8b18c972200b107385d4ec61a25d9dea2",
+        publish_name="spark-x2.6:4b-q8_0",
+        publish_digest="145c2aa606820663f26ad530b8fc141ed885e2e9ca29f9be7c3bfe8931d58b81",
     ),
     "nemotron-3.5-30b": ModelSpec(
         label="Nemotron 3.5 30B-A3B (MoE)",
