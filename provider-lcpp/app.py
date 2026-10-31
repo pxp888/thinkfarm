@@ -168,6 +168,8 @@ MODELS = {
             ("-fa", "on"),
             ("--spec-type", "draft-mtp"),
             ("--spec-draft-n-max", "6"),
+            ("--cache-type-k", "q8_0"),
+            ("--cache-type-v", "q8_0"),
         ),
         downloads=(
             ModelFileArtifact(
@@ -192,6 +194,8 @@ MODELS = {
         main_model=Path("Spark-X2.6-4B-Q8_0.gguf"),
         extra_args=(
             ("-fa", "on"),
+            ("--cache-type-k", "q8_0"),
+            ("--cache-type-v", "q8_0"),
         ),
         downloads=(
             ModelFileArtifact(
