@@ -150,6 +150,8 @@ class ProviderClient:
                                     "name": name,
                                     "digest": getattr(self.config, "model_digest", "") or name
                                 }
+                                if "architecture" in m:
+                                    m_dict["architecture"] = m["architecture"]
                                 models.append(m_dict)
                         self._cached_raw_models = models
                         self._last_raw_models_time = now
@@ -278,7 +280,12 @@ class ProviderClient:
                 if self.status_callback:
                     self.status_callback("Connecting")
                 
-                async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
+                async with websockets.connect(
+                    ws_url,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    max_size=50 * 1024 * 1024
+                ) as ws:
                     self.websocket = ws
                     self.log("WebSocket connected successfully")
                     if self.status_callback:
@@ -499,7 +506,20 @@ class ProviderClient:
             translated_body["stream"] = body.get("stream", False)
             
             if endpoint == "chat":
-                translated_body["messages"] = body.get("messages", [])
+                raw_msgs = body.get("messages", [])
+                translated_msgs = []
+                for msg in raw_msgs:
+                    m_copy = dict(msg)
+                    images = m_copy.pop("images", None)
+                    if images and isinstance(images, list):
+                        content = m_copy.get("content", "")
+                        parts = [{"type": "text", "text": content}] if content else []
+                        for img in images:
+                            url = img if img.startswith("data:") else f"data:image/jpeg;base64,{img}"
+                            parts.append({"type": "image_url", "image_url": {"url": url}})
+                        m_copy["content"] = parts
+                    translated_msgs.append(m_copy)
+                translated_body["messages"] = translated_msgs
             elif endpoint == "generate":
                 translated_body["prompt"] = body.get("prompt", "")
             elif endpoint in ("embed", "embeddings"):

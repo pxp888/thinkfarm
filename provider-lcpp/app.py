@@ -99,10 +99,13 @@ MODELS = {
         main_model=Path("Qwen3.8-27B-UD-Q4_K_M.gguf"),
         mmproj=Path("mmproj-BF16.gguf"),
         extra_args=(
+            ("-fa", "on"),
             ("--spec-type", "draft-mtp"),
             ("--spec-draft-model", Path("mtp-Qwen3.8-27B-Q4_0.gguf")),
             ("--spec-draft-n-max", "3"),
             ("--spec-draft-ngl", "99"),
+            ("--cache-type-k", "q8_0"),
+            ("--cache-type-v", "q8_0"),
         ),
         downloads=(
             ModelFileArtifact(
@@ -132,6 +135,11 @@ MODELS = {
         directory=ROOT / "qwen3.6-35b",
         main_model=Path("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"),
         mmproj=Path("mmproj-BF16.gguf"),
+        extra_args=(
+            ("-fa", "on"),
+            ("--cache-type-k", "q8_0"),
+            ("--cache-type-v", "q8_0"),
+        ),
         downloads=(
             ModelFileArtifact(
                 rel_path=Path("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"),
@@ -157,6 +165,7 @@ MODELS = {
         # MTP module is baked into the main GGUF (unsloth -MTP-GGUF repo); no
         # separate --spec-draft-model file needed.
         extra_args=(
+            ("-fa", "on"),
             ("--spec-type", "draft-mtp"),
             ("--spec-draft-n-max", "6"),
         ),
@@ -201,8 +210,8 @@ MODELS = {
         main_model=Path("Nemotron-3.5-Lightning-30B-A3B-NVFP4.gguf"),
         extra_args=(
             ("-fa", "on"),
-            ("--cache-type-k", "q4_0"),
-            ("--cache-type-v", "q4_0"),
+            ("--cache-type-k", "q8_0"),
+            ("--cache-type-v", "q8_0"),
         ),
         downloads=(
             ModelFileArtifact(
@@ -387,7 +396,6 @@ def build_args(port: int, name: str, slots: int = 1) -> list[str]:
         "--alias", alias,
         "--host", HOST,
         "--port", str(port),
-        "-ngl", "99",
         "--jinja",
         "--parallel", str(max(1, int(slots))),
     ]
@@ -407,6 +415,9 @@ def build_args(port: int, name: str, slots: int = 1) -> list[str]:
     for flag, value in m.extra_args:
         args.append(flag)
         args.append(str(m.directory / value) if isinstance(value, Path) else str(value))
+    if os.environ.get("LLAMA_ARGS"):
+        import shlex
+        args.extend(shlex.split(os.environ["LLAMA_ARGS"]))
     return args
 
 

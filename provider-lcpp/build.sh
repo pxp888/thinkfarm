@@ -33,7 +33,7 @@ fi
 
 UPSTREAM="upstream-bins"
 WHEEL_CACHE_ROOT=".wheel-cache"
-VERSION="b11821"
+VERSION="b11976"
 PROVIDER_VERSION=$(sed -n -E "s/^PROVIDER_VERSION[[:space:]]*=[[:space:]]*['\"]?([^ '\"#]+).*/\1/p" gui.py | head -n 1)
 if [ -z "$PROVIDER_VERSION" ]; then
     echo "[build] ERROR: Could not extract PROVIDER_VERSION from gui.py" >&2
