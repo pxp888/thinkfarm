@@ -64,5 +64,7 @@ next to the app.
 Slots: set `SLOTS = N` under `[provider]` in `custom.ini` (default 1). It controls
 both how many concurrent jobs the node accepts and llama-server's `--parallel`.
 Each slot needs its own KV cache, so raise it only if your VRAM has room. Change
-takes effect on restart. Logs go to `logs/llama-server.log`. Stop: **Exit** from the tray
+takes effect on restart. Set `LLAMA_ARGS` under `[provider]` (or via environment variable)
+to pass custom flags to llama-server (e.g. `LLAMA_ARGS = --tensor-split 57,43`).
+Logs go to `logs/llama-server.log`. Stop: **Exit** from the tray
 menu (GUI) or Ctrl+C (`--headless`) — the llama-server child is terminated cleanly.

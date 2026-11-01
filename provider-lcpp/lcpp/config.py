@@ -33,6 +33,7 @@ class ConfigManager:
         self.model_digest: str = ""
         self.selected_model: str = ""  # which bundled model the provider-lcpp app should load
         self.lccp_context: int = 0  # explicit context limit for job acceptance (0 = use probed cache, -1 = unlimited)
+        self.llama_args: str = ""  # extra flags passed to bundled llama-server (e.g. --tensor-split 57,43)
 
         self.load()
 
@@ -128,6 +129,8 @@ class ConfigManager:
         except ValueError:
             self.lccp_context = 0
 
+        self.llama_args = v(self._SECTION_PROVIDER, "LLAMA_ARGS", "") or ""
+
         # Booleans
         wl_en = v(self._SECTION_CONSUMER, "WHITELIST_ENABLED", "false") or "false"
         self.whitelist_enabled = wl_en.lower() == "true"
@@ -177,6 +180,8 @@ class ConfigManager:
                 raw.remove_option(self._SECTION_PROVIDER, legacy_key)
         raw.set(self._SECTION_PROVIDER, "SELECTED_MODEL", self.selected_model)
         raw.set(self._SECTION_PROVIDER, "lccp_context", str(self.lccp_context))
+        if self.llama_args:
+            raw.set(self._SECTION_PROVIDER, "LLAMA_ARGS", self.llama_args)
 
         os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
         with open(self.config_path, "w", encoding="utf-8") as f:

@@ -103,7 +103,6 @@ MODELS = {
             ("--spec-type", "draft-mtp"),
             ("--spec-draft-model", Path("mtp-Qwen3.8-27B-Q4_0.gguf")),
             ("--spec-draft-n-max", "3"),
-            ("--spec-draft-ngl", "99"),
             ("--cache-type-k", "q8_0"),
             ("--cache-type-v", "q8_0"),
         ),
@@ -387,7 +386,7 @@ def pick_port() -> int:
         return s.getsockname()[1]
 
 
-def build_args(port: int, name: str, slots: int = 1) -> list[str]:
+def build_args(port: int, name: str, slots: int = 1, config: ConfigManager | None = None) -> list[str]:
     """Canonical invocation of a bundled model (Qwen3.x sampling per oqwen.sh).
 
     `slots` maps to llama-server's --parallel; each slot gets its own KV cache,
@@ -419,9 +418,23 @@ def build_args(port: int, name: str, slots: int = 1) -> list[str]:
     for flag, value in m.extra_args:
         args.append(flag)
         args.append(str(m.directory / value) if isinstance(value, Path) else str(value))
-    if os.environ.get("LLAMA_ARGS"):
+
+    # Custom llama flags: LLAMA_ARGS env var > custom.ini LLAMA_ARGS
+    llama_args = os.environ.get("LLAMA_ARGS")
+    if not llama_args:
+        if config and config.llama_args:
+            llama_args = config.llama_args
+        else:
+            try:
+                cfg = ConfigManager(str(ROOT))
+                llama_args = cfg.llama_args
+            except Exception:
+                pass
+
+    if llama_args:
         import shlex
-        args.extend(shlex.split(os.environ["LLAMA_ARGS"]))
+        args.extend(shlex.split(llama_args))
+
     return args
 
 
@@ -447,15 +460,22 @@ def find_driver_dirs() -> list[str]:
 class LlamaServer:
     """Owns the child llama-server process."""
 
-    def __init__(self, port: int, model_name: str = DEFAULT_MODEL, slots: int = 1):
+    def __init__(
+        self,
+        port: int,
+        model_name: str = DEFAULT_MODEL,
+        slots: int = 1,
+        config: ConfigManager | None = None,
+    ):
         self.port = port
         self.model_name = model_name
         self.slots = max(1, int(slots))
+        self.config = config
         self.proc: subprocess.Popen | None = None
         self.log_file = None
 
     def start(self):
-        args = build_args(self.port, self.model_name, self.slots)
+        args = build_args(self.port, self.model_name, self.slots, self.config)
         LOG_DIR.mkdir(exist_ok=True)
         env = dict(os.environ)
         # Configure shared library / DLL search paths
@@ -592,7 +612,7 @@ def main():
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, lambda *_: _sigint_handler())
 
-    runner = LlamaServer(port, model_name, config.slots)
+    runner = LlamaServer(port, model_name, config.slots, config)
 
     async def run():
         runner.start()

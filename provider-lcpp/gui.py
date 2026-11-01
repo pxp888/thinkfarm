@@ -131,7 +131,7 @@ class ProviderWorker(threading.Thread):
         model_name = cfg.selected_model if cfg.selected_model in app.MODELS else app.DEFAULT_MODEL
         app.apply_publish_info(cfg, model_name)  # published name/digest from the model spec
         port = app.pick_port()
-        runner = app.LlamaServer(port, model_name)
+        runner = app.LlamaServer(port, model_name, cfg.slots, cfg)
         cfg.local_lcpp_url = f"http://{app.HOST}:{port}"  # point provider at the child we own
 
         self.signals.server_state.emit("Starting…")

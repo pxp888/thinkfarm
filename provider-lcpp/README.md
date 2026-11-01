@@ -65,6 +65,8 @@ caches. Defaults to the public central server `https://app.thinkfarm.eu`.
 - `MODELS_PATH` (`custom.ini`, `[provider]`) — relocate where model weights
   are downloaded and loaded from, e.g. `MODELS_PATH=/mnt/persist/models`
   (per-model subfolders like `qwen3.8-27b/` are kept underneath it).
+- `LLAMA_ARGS` (`custom.ini` `[provider]` or env) — pass extra flags to the child
+  `llama-server` (e.g. `LLAMA_ARGS = --tensor-split 57,43`).
 
 ## Gotchas
 
