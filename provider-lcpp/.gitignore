@@ -40,6 +40,7 @@ ENV/
 .env
 .env.local
 .env.*.local
+custom.ini
 
 # --- IDE / OS ---
 .vscode/

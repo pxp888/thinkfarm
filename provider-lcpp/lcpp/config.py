@@ -9,11 +9,14 @@ class ConfigManager:
     _SECTION_CONSUMER = "consumer"
 
     def __init__(self, workspace_dir=None):
-        self.workspace_dir = Path(workspace_dir or Path(__file__).resolve().parent)
+        if workspace_dir:
+            self.workspace_dir = Path(workspace_dir)
+        else:
+            pkg_dir = Path(__file__).resolve().parent
+            self.workspace_dir = pkg_dir.parent if pkg_dir.name == "lcpp" else pkg_dir
+        self.config_dir = self.workspace_dir
+        self.config_path = self.workspace_dir / "custom.ini"
         self.env_path = self.workspace_dir / ".env"
-        self.config_dir = Path(os.path.expanduser("~/.thinkfarm"))
-        self.config_dir.mkdir(parents=True, exist_ok=True)
-        self.config_path = self.config_dir / "custom.ini"
 
         # Defaults – never read from disk; only the loaded values survive
         self.server_url: str = "https://app.thinkfarm.eu"
@@ -157,31 +160,54 @@ class ConfigManager:
         if raw.has_section("client"):
             raw.remove_section("client")
 
+        # Clean up consumer section if it has no real consumer configured
+        if raw.has_section(self._SECTION_CONSUMER):
+            cid = raw.get(self._SECTION_CONSUMER, "consumer_id", fallback="").strip()
+            if not cid:
+                raw.remove_section(self._SECTION_CONSUMER)
+
         if not raw.has_section(self._SECTION_PROVIDER):
             raw.add_section(self._SECTION_PROVIDER)
-        if not raw.has_section(self._SECTION_CONSUMER):
-            raw.add_section(self._SECTION_CONSUMER)
 
         raw.set(self._SECTION_PROVIDER, "PROVIDER_ID", self.provider_id)
         raw.set(self._SECTION_PROVIDER, "SLOTS", str(self.slots))
-        raw.set(self._SECTION_CONSUMER, "CONSUMER_ID", self.consumer_id)
-        raw.set(self._SECTION_CONSUMER, "CLIENT_PORT", str(self.port))
-        raw.set(self._SECTION_CONSUMER, "WHITELIST_ENABLED", "true" if self.whitelist_enabled else "false")
-        raw.set(self._SECTION_CONSUMER, "WHITELIST_MODELS", ",".join(self.whitelist_models))
-        raw.set(self._SECTION_PROVIDER, "LOCAL_LCPP_URL", self.local_lcpp_url)
-        raw.set(self._SECTION_PROVIDER, "AUTO_MANAGE_MODELS", "true" if self.auto_manage_models else "false")
-        raw.set(self._SECTION_PROVIDER, "GB_ALLOWED", str(self.gb_allowed))
-        raw.set(self._SECTION_PROVIDER, "LCPP_RESTART_CMD", self.lcpp_restart_cmd)
-        raw.set(self._SECTION_PROVIDER, "MODELS_PATH", self.models_path)
-        # MODEL_NAME / MODEL_DIGEST intentionally not written: the published
-        # identity is defined by the model spec (app.apply_publish_info).
-        for legacy_key in ("MODEL_NAME", "MODEL_DIGEST", "LCPP_MODELS_PATH"):
-            if raw.has_option(self._SECTION_PROVIDER, legacy_key):
-                raw.remove_option(self._SECTION_PROVIDER, legacy_key)
-        raw.set(self._SECTION_PROVIDER, "SELECTED_MODEL", self.selected_model)
-        raw.set(self._SECTION_PROVIDER, "lccp_context", str(self.lccp_context))
+        if self.models_path:
+            raw.set(self._SECTION_PROVIDER, "MODELS_PATH", self.models_path)
+        elif raw.has_option(self._SECTION_PROVIDER, "MODELS_PATH"):
+            raw.remove_option(self._SECTION_PROVIDER, "MODELS_PATH")
+
         if self.llama_args:
             raw.set(self._SECTION_PROVIDER, "LLAMA_ARGS", self.llama_args)
+        elif raw.has_option(self._SECTION_PROVIDER, "LLAMA_ARGS"):
+            raw.remove_option(self._SECTION_PROVIDER, "LLAMA_ARGS")
+
+        # Strip unused / legacy options from the provider section
+        for unused_key in (
+            "MODEL_NAME",
+            "MODEL_DIGEST",
+            "LCPP_MODELS_PATH",
+            "OLLAMA_MODELS_PATH",
+            "LOCAL_LCPP_URL",
+            "LOCAL_OLLAMA_URL",
+            "AUTO_MANAGE_MODELS",
+            "GB_ALLOWED",
+            "LCPP_RESTART_CMD",
+            "OLLAMA_RESTART_CMD",
+        ):
+            if raw.has_option(self._SECTION_PROVIDER, unused_key):
+                raw.remove_option(self._SECTION_PROVIDER, unused_key)
+
+        # Only persist SELECTED_MODEL if non-empty and differing from the default model
+        if self.selected_model and self.selected_model != "qwen3.8-27b":
+            raw.set(self._SECTION_PROVIDER, "SELECTED_MODEL", self.selected_model)
+        elif raw.has_option(self._SECTION_PROVIDER, "SELECTED_MODEL"):
+            raw.remove_option(self._SECTION_PROVIDER, "SELECTED_MODEL")
+
+        # Only persist lccp_context if explicitly set (non-zero)
+        if self.lccp_context != 0:
+            raw.set(self._SECTION_PROVIDER, "lccp_context", str(self.lccp_context))
+        elif raw.has_option(self._SECTION_PROVIDER, "lccp_context"):
+            raw.remove_option(self._SECTION_PROVIDER, "lccp_context")
 
         os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
         with open(self.config_path, "w", encoding="utf-8") as f:

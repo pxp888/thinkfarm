@@ -54,9 +54,8 @@ That's the whole install story — copy the folder to the machine and run it.
 
 ## Configuration
 
-Reuses the standard thinkfarm provider config: `~/.thinkfarm/custom.ini`
-(`provider_id`, `slots`, ...) and the `~/.thinkfarm/*.json` context/baseline
-caches. Defaults to the public central server `https://app.thinkfarm.eu`.
+Reuses the standard thinkfarm provider config: `custom.ini`
+(`provider_id`, `slots`, ...) next to the app. Defaults to the public central server `https://app.thinkfarm.eu`.
 
 - `LOCAL_PORT` (env, default: a free ephemeral port) — pin the llama-server
   port you own, e.g. `LOCAL_PORT=8086 ./thinkfarm.sh`.

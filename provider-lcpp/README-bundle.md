@@ -30,7 +30,7 @@ time, only the GUI needs network on first run — headless is unaffected.
 
 Each model lives in its own folder; exactly one is loaded at a time (they never
 run simultaneously). Choose with `--model NAME`, the `THINKFARM_MODEL` env var,
-or the Model dropdown in the GUI (persisted to `~/.thinkfarm/custom.ini`):
+or the Model dropdown in the GUI (persisted to `custom.ini`):
 
 - `qwen3.8-27b/` (default) — `Qwen3.8-27B-UD-Q4_K_M.gguf`, `mmproj-BF16.gguf`,
   `mtp-Qwen3.8-27B-Q4_0.gguf` (MTP draft for speculative decoding)
@@ -42,7 +42,7 @@ or the Model dropdown in the GUI (persisted to `~/.thinkfarm/custom.ini`):
 
 By default each model downloads into and loads from its folder next to the app.
 To store weights elsewhere (e.g. a bigger disk), set `MODELS_PATH` in
-`~/.thinkfarm/custom.ini` — both download and load use it, keeping the same
+`custom.ini` — both download and load use it, keeping the same
 per-model subfolders:
 
     [provider]
@@ -58,7 +58,7 @@ server and uses it to gate job acceptance.
 
 ## Config
 
-Read from `~/.thinkfarm/custom.ini` (provider id, slots, etc.) and optional `.env`
+Read from `custom.ini` (provider id, slots, etc.) and optional `.env`
 next to the app.
 
 Slots: set `SLOTS = N` under `[provider]` in `custom.ini` (default 1). It controls
