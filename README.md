@@ -33,9 +33,7 @@ A private-pool provider connects with an **outbound** WebSocket, so no inbound p
 
 ## Architecture
 
-There are three moving parts: a **central server** (`app.thinkfarm.eu`) that clients call directly and that routes inference jobs, and **provider nodes** that run inference on their own hardware. `provider-lcpp` bundles its inference engine and spawns its own `llama-server` child process; `mirror` points at an engine you started yourself. Neither is a proxy for a third-party hosted service.
-
-![Architecture](assets/thinkfarmArch.jpeg)
+Clients talk directly to the hosted **central server** (`app.thinkfarm.eu`), which routes inference jobs to **provider nodes** running on their own hardware. `provider-lcpp` bundles its inference engine and spawns its own `llama-server` child process; `mirror` points at an engine you started yourself. Neither is a proxy for a third-party hosted service.
 
 **The central server.** Multiple stateless FastAPI instances sharing live routing state in a Redis/Valkey cluster: provider status, per-model idle sets scored by context window, and active-job tracking. Every routing key is namespaced by pool (`model:idle:zset:<digest>` for the public pool, `pool:<uuid>:model:idle:zset:<digest>` for a private one), so a private pool's models and providers are invisible to the public pool and to other private pools. Provider and Client IDs are resolved fail-closed against PostgreSQL — a database hiccup never silently drops a private ID into the public pool. Completed jobs (provider, model, pool, token counts, duration) are persisted to PostgreSQL for history, performance analytics, and billing.
 
