@@ -17,8 +17,9 @@ import sys
 import threading
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT / "lcpp"))  # reuse lcpp's provider implementation
+ROOT = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+if str(ROOT / "lcpp") not in sys.path:
+    sys.path.insert(0, str(ROOT / "lcpp"))  # reuse lcpp's provider implementation
 
 # Importing app runs its module setup (paths) but not main(); we reuse
 # LlamaServer + pick_port so child-process behavior stays identical to headless.
@@ -31,6 +32,11 @@ from downloader import (
     format_eta,
     ProgressInfo,
     DownloadCancelled,
+)  # noqa: E402
+from runtime import (
+    BACKEND_LABELS,
+    RUNTIME_VERSION,
+    download_and_extract_runtime,
 )  # noqa: E402
 
 from PyQt6.QtWidgets import (
@@ -52,7 +58,7 @@ try:
 except ImportError:
     requests = None
 
-PROVIDER_VERSION = 40
+PROVIDER_VERSION = 41
 
 
 class AppSignals(QObject):
@@ -65,6 +71,11 @@ class AppSignals(QObject):
     download_finished = pyqtSignal(str)   # model label
     download_error = pyqtSignal(str)      # error message
     download_cancelled = pyqtSignal()     # cancelled / paused
+    runtime_download_progress = pyqtSignal(object)  # ProgressInfo
+    runtime_download_status = pyqtSignal(str)       # status text (e.g. Extracting...)
+    runtime_download_finished = pyqtSignal(str)     # backend label
+    runtime_download_error = pyqtSignal(str)        # error message
+    runtime_download_cancelled = pyqtSignal()       # cancelled / paused
 
 
 class StatusIndicator(QFrame):
@@ -129,9 +140,10 @@ class ProviderWorker(threading.Thread):
     async def _run(self, shutdown):
         cfg = self.config
         model_name = cfg.selected_model if cfg.selected_model in app.MODELS else app.DEFAULT_MODEL
+        backend = app.resolve_backend(saved=cfg.backend)
         app.apply_publish_info(cfg, model_name)  # published name/digest from the model spec
         port = app.pick_port()
-        runner = app.LlamaServer(port, model_name, cfg.slots, cfg)
+        runner = app.LlamaServer(port, model_name, cfg.slots, cfg, backend=backend)
         cfg.local_lcpp_url = f"http://{app.HOST}:{port}"  # point provider at the child we own
 
         self.signals.server_state.emit("Starting…")
@@ -217,14 +229,44 @@ class DownloadWorker(threading.Thread):
             self.signals.download_error.emit(str(e))
 
 
+class RuntimeDownloadWorker(threading.Thread):
+    """Downloads and extracts the llama-server runtime in a background thread."""
+
+    def __init__(self, signals, backend: str):
+        super().__init__()
+        self.daemon = True
+        self.signals = signals
+        self.backend = backend
+        self.cancel_event = threading.Event()
+
+    def cancel(self):
+        self.cancel_event.set()
+
+    def run(self):
+        label = BACKEND_LABELS.get(self.backend, self.backend)
+        try:
+            download_and_extract_runtime(
+                self.backend,
+                cancel_event=self.cancel_event,
+                progress_callback=lambda p: self.signals.runtime_download_progress.emit(p),
+                status_callback=lambda s: self.signals.runtime_download_status.emit(s),
+            )
+            self.signals.runtime_download_finished.emit(label)
+        except DownloadCancelled:
+            self.signals.runtime_download_cancelled.emit()
+        except Exception as e:
+            self.signals.runtime_download_error.emit(str(e))
+
+
 class ThinkfarmProviderApp(QMainWindow):
     VERSION_CHECK_URL = "https://thinkfarm.eu/api/version"
 
-    def __init__(self, model_override: str | None = None):
+    def __init__(self, model_override: str | None = None, backend_override: str | None = None):
         super().__init__()
-        self.config_manager = ConfigManager(str(ROOT))
+        self.config_manager = ConfigManager()
         app.apply_models_dir(self.config_manager)
-        self.model_override = model_override  # --model NAME from argv (GUI mode)
+        self.model_override = model_override      # --model NAME from argv (GUI mode)
+        self.backend_override = backend_override  # --backend NAME from argv (GUI mode)
         self.worker = None
 
         self.signals = AppSignals()
@@ -236,7 +278,13 @@ class ThinkfarmProviderApp(QMainWindow):
         self.signals.download_finished.connect(self._on_download_finished)
         self.signals.download_error.connect(self._on_download_error)
         self.signals.download_cancelled.connect(self._on_download_cancelled)
+        self.signals.runtime_download_progress.connect(self._on_runtime_download_progress)
+        self.signals.runtime_download_status.connect(self._on_runtime_download_status)
+        self.signals.runtime_download_finished.connect(self._on_runtime_download_finished)
+        self.signals.runtime_download_error.connect(self._on_runtime_download_error)
+        self.signals.runtime_download_cancelled.connect(self._on_runtime_download_cancelled)
         self.download_worker = None
+        self.runtime_download_worker = None
 
         # Route stdlib logging (provider logs etc.) into the activity pane.
         handler = QtLogHandler(self.signals.log_received.emit)
@@ -298,6 +346,8 @@ class ThinkfarmProviderApp(QMainWindow):
         self.tray_icon.hide()
         if self.download_worker and self.download_worker.is_alive():
             self.download_worker.cancel()
+        if self.runtime_download_worker and self.runtime_download_worker.is_alive():
+            self.runtime_download_worker.cancel()
         self._stop_worker(join=True, timeout=25)
         QApplication.quit()
 
@@ -402,11 +452,24 @@ class ThinkfarmProviderApp(QMainWindow):
         idx = self.model_combo.findData(saved if saved in app.MODELS else app.DEFAULT_MODEL)
         self.model_combo.setCurrentIndex(idx)
 
+        self.backend_combo = QComboBox()
+        for key, label in BACKEND_LABELS.items():
+            self.backend_combo.addItem(label, key)
+        resolved_backend = app.resolve_backend(self.backend_override, saved=self.config_manager.backend)
+        b_idx = self.backend_combo.findData(resolved_backend)
+        if b_idx >= 0:
+            self.backend_combo.setCurrentIndex(b_idx)
+        self.runtime_status_lbl = QLabel("")
+        self.runtime_status_lbl.setStyleSheet("font-size: 11px;")
+        self.backend_combo.currentIndexChanged.connect(self._on_backend_selection_changed)
+
         self.model_status_lbl = QLabel("")
         self.model_status_lbl.setStyleSheet("font-size: 11px;")
         self.model_combo.currentIndexChanged.connect(self._on_model_selection_changed)
 
         form.addRow("Provider ID:", self.provider_id_input)
+        form.addRow("Backend:", self.backend_combo)
+        form.addRow("", self.runtime_status_lbl)
         form.addRow("Model:", self.model_combo)
         form.addRow("", self.model_status_lbl)
 
@@ -415,6 +478,43 @@ class ThinkfarmProviderApp(QMainWindow):
         self.save_btn = QPushButton("Save Configuration")
         self.save_btn.clicked.connect(self.save_config)
         provider_layout.addWidget(self.save_btn)
+
+        # Runtime download widget & progress bar
+        self.runtime_download_widget = QWidget()
+        rt_layout = QVBoxLayout(self.runtime_download_widget)
+        rt_layout.setContentsMargins(0, 4, 0, 4)
+
+        self.runtime_download_btn = QPushButton("Download Runtime")
+        self.runtime_download_btn.setObjectName("actionButton")
+        self.runtime_download_btn.clicked.connect(self.start_runtime_download)
+        rt_layout.addWidget(self.runtime_download_btn)
+
+        self.runtime_progress_bar = QProgressBar()
+        self.runtime_progress_bar.setTextVisible(False)
+        self.runtime_progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid rgba(0, 0, 0, 0.08);
+                height: 10px;
+                background-color: #e9e9ee;
+            }
+            QProgressBar::chunk {
+                background-color: #548889;
+            }
+        """)
+        rt_layout.addWidget(self.runtime_progress_bar)
+
+        rt_sub_row = QHBoxLayout()
+        self.runtime_info_lbl = QLabel("")
+        self.runtime_info_lbl.setStyleSheet("font-size: 11px; color: #1c1c1e;")
+        self.cancel_runtime_btn = QPushButton("Cancel")
+        self.cancel_runtime_btn.setFixedWidth(80)
+        self.cancel_runtime_btn.clicked.connect(self.cancel_runtime_download)
+        rt_sub_row.addWidget(self.runtime_info_lbl)
+        rt_sub_row.addStretch()
+        rt_sub_row.addWidget(self.cancel_runtime_btn)
+        rt_layout.addLayout(rt_sub_row)
+
+        provider_layout.addWidget(self.runtime_download_widget)
 
         # Download widget & progress bar
         self.download_widget = QWidget()
@@ -463,7 +563,7 @@ class ThinkfarmProviderApp(QMainWindow):
         log_path_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         provider_layout.addWidget(log_path_lbl)
 
-        self._form_fields = [self.provider_id_input, self.model_combo, self.save_btn]
+        self._form_fields = [self.provider_id_input, self.backend_combo, self.model_combo, self.save_btn]
 
         left_layout.addWidget(provider_group)
         left_layout.addStretch()
@@ -504,6 +604,7 @@ class ThinkfarmProviderApp(QMainWindow):
         self._tail_timer = QTimer(self)
         self._tail_timer.setInterval(2000)
         self._tail_timer.timeout.connect(self._poll_server_log)
+        self._update_runtime_status()
         self._update_model_status()
 
     def toggle_log_visibility(self):
@@ -511,13 +612,145 @@ class ThinkfarmProviderApp(QMainWindow):
         self.log_panel.setVisible(not self.logs_hidden)
         self.hide_logs_btn.setText("Show Logs" if self.logs_hidden else "Hide Logs")
 
-    # ----------------------------------------------------------- model / downloads
+    # ----------------------------------------------------------- model / runtime downloads
+    def _current_backend(self) -> str:
+        return self.backend_combo.currentData() or app.resolve_backend(saved=self.config_manager.backend)
+
+    def _downloads_active(self) -> bool:
+        return bool(
+            (self.download_worker and self.download_worker.is_alive())
+            or (self.runtime_download_worker and self.runtime_download_worker.is_alive())
+        )
+
+    def _update_start_button_state(self):
+        if self.worker and self.worker.is_alive():
+            return
+        if self._downloads_active():
+            self.toggle_btn.setEnabled(False)
+            self.toggle_btn.setToolTip("Wait for download to finish before starting.")
+            return
+        rt_ok = app.runtime_download_status(self._current_backend())["installed"]
+        model_name = self.model_combo.currentData() or app.DEFAULT_MODEL
+        model_ok = app.model_download_status(model_name)["installed"]
+        if rt_ok and model_ok:
+            self.toggle_btn.setEnabled(True)
+            self.toggle_btn.setToolTip("")
+        elif not rt_ok and not model_ok:
+            self.toggle_btn.setEnabled(False)
+            self.toggle_btn.setToolTip("Download the runtime and model weights before starting.")
+        elif not rt_ok:
+            self.toggle_btn.setEnabled(False)
+            self.toggle_btn.setToolTip("Download the llama-server runtime before starting.")
+        else:
+            self.toggle_btn.setEnabled(False)
+            self.toggle_btn.setToolTip("Download the model weights before starting.")
+
+    def _on_backend_selection_changed(self, idx):
+        self._update_runtime_status()
+
+    def _update_runtime_status(self):
+        backend = self._current_backend()
+        status = app.runtime_download_status(backend)
+        self.runtime_status_lbl.setToolTip(str(status["runtime_dir"]))
+        if self.runtime_download_worker and self.runtime_download_worker.is_alive():
+            return
+
+        if status["installed"]:
+            src = "bundled" if status["source"] == "bundled" else RUNTIME_VERSION
+            self.runtime_status_lbl.setText(f"✓ Runtime ready ({src})")
+            self.runtime_status_lbl.setStyleSheet("color: #2e7d32; font-size: 11px;")
+            self.runtime_download_widget.hide()
+        else:
+            if status["downloaded_bytes"] > 0:
+                cur_fmt = format_bytes(status["downloaded_bytes"])
+                tot_fmt = format_bytes(status["total_bytes"])
+                rem_fmt = format_bytes(status["remaining_bytes"])
+                self.runtime_status_lbl.setText(f"⏸ Runtime download paused ({cur_fmt} / {tot_fmt})")
+                self.runtime_download_btn.setText(f"Resume Runtime Download ({rem_fmt})")
+            else:
+                tot_fmt = format_bytes(status["total_bytes"])
+                self.runtime_status_lbl.setText(f"⚠ Runtime missing ({tot_fmt} required)")
+                self.runtime_download_btn.setText(f"Download {BACKEND_LABELS.get(backend, backend)} Runtime ({tot_fmt})")
+
+            self.runtime_status_lbl.setStyleSheet("color: #b45309; font-size: 11px;")
+            self.runtime_download_widget.show()
+            self.runtime_download_btn.show()
+            self.runtime_progress_bar.hide()
+            self.runtime_info_lbl.hide()
+            self.cancel_runtime_btn.hide()
+
+        self._update_start_button_state()
+
+    def start_runtime_download(self):
+        if self.runtime_download_worker and self.runtime_download_worker.is_alive():
+            return
+        backend = self._current_backend()
+        label = BACKEND_LABELS.get(backend, backend)
+        self.runtime_download_btn.hide()
+        self.runtime_progress_bar.show()
+        self.runtime_progress_bar.setRange(0, 100)
+        self.runtime_progress_bar.setValue(0)
+        self.runtime_info_lbl.show()
+        self.runtime_info_lbl.setText("Starting runtime download…")
+        self.cancel_runtime_btn.show()
+        self.cancel_runtime_btn.setEnabled(True)
+        self.cancel_runtime_btn.setText("Cancel")
+        self._set_form_enabled(False)
+        self._update_start_button_state()
+
+        self.append_log(f"[runtime] Downloading {label} runtime ({RUNTIME_VERSION})…", "INFO")
+        self.runtime_download_worker = RuntimeDownloadWorker(self.signals, backend)
+        self.runtime_download_worker.start()
+
+    def cancel_runtime_download(self):
+        if self.runtime_download_worker and self.runtime_download_worker.is_alive():
+            self.cancel_runtime_btn.setEnabled(False)
+            self.cancel_runtime_btn.setText("Cancelling…")
+            self.runtime_download_worker.cancel()
+
+    def _on_runtime_download_progress(self, p: ProgressInfo):
+        self.runtime_progress_bar.setRange(0, 100)
+        self.runtime_progress_bar.setValue(int(p.overall_percent))
+        msg = (
+            f"[{p.file_index}/{p.total_files}] {p.filename}: {p.file_percent:.1f}% "
+            f"({format_bytes(p.file_bytes_done)}/{format_bytes(p.file_bytes_total)}) • "
+            f"{format_bytes(p.speed_bps)}/s • ETA {format_eta(p.eta_seconds)}"
+        )
+        self.runtime_info_lbl.setText(msg)
+
+    def _on_runtime_download_status(self, msg: str):
+        self.runtime_progress_bar.setRange(0, 0)  # indeterminate while extracting
+        self.runtime_info_lbl.setText(msg)
+        self.append_log(f"[runtime] {msg}", "INFO")
+
+    def _on_runtime_download_finished(self, label: str):
+        self.runtime_download_worker = None
+        if not self._downloads_active():
+            self._set_form_enabled(True)
+        self.append_log(f"[runtime] {label} runtime ({RUNTIME_VERSION}) installed!", "INFO")
+        self._update_runtime_status()
+
+    def _on_runtime_download_cancelled(self):
+        self.runtime_download_worker = None
+        if not self._downloads_active():
+            self._set_form_enabled(True)
+        self.append_log("[runtime] Runtime download paused. You can resume at any time.", "WARNING")
+        self._update_runtime_status()
+
+    def _on_runtime_download_error(self, err: str):
+        self.runtime_download_worker = None
+        if not self._downloads_active():
+            self._set_form_enabled(True)
+        self.append_log(f"[runtime] Runtime download error: {err}", "ERROR")
+        self._update_runtime_status()
+
     def _on_model_selection_changed(self, idx):
         self._update_model_status()
 
     def _update_model_status(self):
         name = self.model_combo.currentData() or app.DEFAULT_MODEL
         status = app.model_download_status(name)
+        self.model_status_lbl.setToolTip(str(app.MODELS[name].directory))
         if self.download_worker and self.download_worker.is_alive():
             return  # worker manages UI while actively downloading
 
@@ -526,9 +759,6 @@ class ThinkfarmProviderApp(QMainWindow):
             self.model_status_lbl.setText(f"✓ Weights installed ({size_fmt})")
             self.model_status_lbl.setStyleSheet("color: #2e7d32; font-size: 11px;")
             self.download_widget.hide()
-            if not (self.worker and self.worker.is_alive()):
-                self.toggle_btn.setEnabled(True)
-                self.toggle_btn.setToolTip("")
         else:
             if status["downloaded_bytes"] > 0:
                 cur_fmt = format_bytes(status["downloaded_bytes"])
@@ -547,9 +777,8 @@ class ThinkfarmProviderApp(QMainWindow):
             self.download_progress_bar.hide()
             self.download_info_lbl.hide()
             self.cancel_download_btn.hide()
-            if not (self.worker and self.worker.is_alive()):
-                self.toggle_btn.setEnabled(False)
-                self.toggle_btn.setToolTip("Please download the model weights before starting.")
+
+        self._update_start_button_state()
 
     def start_download(self):
         if self.download_worker and self.download_worker.is_alive():
@@ -567,7 +796,7 @@ class ThinkfarmProviderApp(QMainWindow):
         self._set_form_enabled(False)
         self.toggle_btn.setEnabled(False)
 
-        self.append_log(f"[download] Starting download for {m.label}...", "INFO")
+        self.append_log(f"[download] Starting download for {m.label} into {m.directory}...", "INFO")
         self.download_worker = DownloadWorker(self.signals, name)
         self.download_worker.start()
 
@@ -605,14 +834,21 @@ class ThinkfarmProviderApp(QMainWindow):
         self._update_model_status()
 
     def _required_files(self) -> list[Path]:
-        """Files needed to start, for the currently selected model."""
+        """Files needed to start, for the currently selected backend and model."""
         name = self.model_combo.currentData() or app.DEFAULT_MODEL
-        return app.required_binaries() + app.model_files(name)
+        return app.required_binaries(self._current_backend()) + app.model_files(name)
 
     def _check_bundle(self):
-        for p in self._required_files():
-            if not p.exists():
-                logging.getLogger("thinkfarm").error(f"required file missing: {p}")
+        rt = app.runtime_download_status(self._current_backend())
+        if not rt["installed"]:
+            logging.getLogger("thinkfarm").info(
+                f"Runtime not installed yet for {self._current_backend()} — click 'Download Runtime' to install."
+            )
+        name = self.model_combo.currentData() or app.DEFAULT_MODEL
+        if not app.model_download_status(name)["installed"]:
+            logging.getLogger("thinkfarm").info(
+                f"Model weights not installed yet for '{name}' — click 'Download Model' to install."
+            )
 
     # ------------------------------------------------------------- config
     def save_config(self):
@@ -620,6 +856,7 @@ class ThinkfarmProviderApp(QMainWindow):
         text = self.provider_id_input.text().strip()
         if text:
             cfg.provider_id = text
+        cfg.backend = self._current_backend()
         cfg.selected_model = self.model_combo.currentData() or app.DEFAULT_MODEL
         cfg.save()
         logging.getLogger("thinkfarm").info("Configuration saved successfully.")
@@ -862,6 +1099,8 @@ class ThinkfarmProviderApp(QMainWindow):
             return
         if self.download_worker and self.download_worker.is_alive():
             self.download_worker.cancel()
+        if self.runtime_download_worker and self.runtime_download_worker.is_alive():
+            self.runtime_download_worker.cancel()
         self._stop_worker(join=True)
         event.accept()
 
@@ -881,9 +1120,14 @@ class QtLogHandler(logging.Handler):
             pass
 
 
-if __name__ == "__main__":
+def main():
     window_model_arg = app.parse_model_arg(sys.argv[1:])
+    window_backend_arg = app.parse_backend_arg(sys.argv[1:])
     app_qt = QApplication(sys.argv)
-    window = ThinkfarmProviderApp(model_override=window_model_arg)
+    window = ThinkfarmProviderApp(model_override=window_model_arg, backend_override=window_backend_arg)
     window.show()
     sys.exit(app_qt.exec())
+
+
+if __name__ == "__main__":
+    main()

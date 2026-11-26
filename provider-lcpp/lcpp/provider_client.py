@@ -3,6 +3,7 @@ sys.modules["websockets.speedups"] = None
 import asyncio
 import json
 import logging
+import ssl
 import time
 import os
 import re
@@ -280,12 +281,19 @@ class ProviderClient:
                 if self.status_callback:
                     self.status_callback("Connecting")
                 
-                async with websockets.connect(
-                    ws_url,
+                connect_kwargs = dict(
                     ping_interval=20,
                     ping_timeout=20,
-                    max_size=50 * 1024 * 1024
-                ) as ws:
+                    max_size=50 * 1024 * 1024,
+                )
+                if ws_url.startswith("wss://"):
+                    try:
+                        import certifi
+                        connect_kwargs["ssl"] = ssl.create_default_context(cafile=certifi.where())
+                    except ImportError:
+                        pass
+
+                async with websockets.connect(ws_url, **connect_kwargs) as ws:
                     self.websocket = ws
                     self.log("WebSocket connected successfully")
                     if self.status_callback:

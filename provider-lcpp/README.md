@@ -1,76 +1,144 @@
 # thinkfarm self-contained provider app
 
 A thinkfarm provider (same provider → central-server WebSocket protocol as
-`lcpp/headless.py`), **minus the separate model-runner install**: the app
-spawns the bundled `llama.cpp` (`llama-server`, CUDA 13 build b11064) itself,
-loads **Qwen3.8-27B (Q4_K_M) + vision projector + MTP draft model**, waits
-until it is ready, points the provider at it, and shuts it down cleanly when
-you stop the app.
+`lcpp/headless.py`), **minus any separate model-runner install**: the app
+downloads and caches `llama.cpp` (`llama-server`, build `b12431`, CUDA or
+Vulkan) into `~/.thinkfarm/runtime/`, loads your chosen model, waits until it is
+ready, points the provider at it, and shuts it down cleanly on exit.
 
-## Run
+## Quick start (single-file executable)
+
+No Python, `venv`, Ollama, or CUDA toolkit install is required — just download
+and run the single executable (`thinkfarm-provider` on Linux,
+`thinkfarm-provider.exe` on Windows):
 
 ```bash
-./thinkfarm.sh                           # PyQt6 dashboard: config form, status dots, activity log,
-                                         #   tray icon (close = minimize to tray, Exit = stop & quit)
-./thinkfarm.sh --headless                # headless daemon
-./thinkfarm.sh --download [--model NAME] # download required model weights directly from the CLI
+# Linux
+chmod +x thinkfarm-provider
+./thinkfarm-provider                                      # PyQt6 dashboard GUI (default)
+./thinkfarm-provider --headless                           # headless daemon (Ctrl+C to stop)
+./thinkfarm-provider --download-runtime [--backend cuda|vulkan]
+./thinkfarm-provider --download [--model NAME] [--backend cuda|vulkan]
 ```
 
-If model weights are not yet downloaded on the machine, you can either click **Download Model** in the GUI dashboard or run `./thinkfarm.sh --download` in the terminal. Downloads are resumable, verified for file integrity (SHA-256), and pre-checked for sufficient free disk space.
+```powershell
+# Windows
+.\thinkfarm-provider.exe                                  # PyQt6 dashboard GUI (default)
+.\thinkfarm-provider.exe --headless                       # headless daemon (Ctrl+C to stop)
+.\thinkfarm-provider.exe --download-runtime --backend cuda
+.\thinkfarm-provider.exe --download --model qwen3.8-27b
+```
 
-Ctrl+C (or SIGTERM) stops the provider and the child `llama-server` cleanly.
-That's the whole install story — copy the folder to the machine and run it.
+### First-run flow
+1. On first launch, `~/.thinkfarm/custom.ini` is created automatically with a
+   generated `provider_id` and ready-to-edit defaults.
+2. Pick your **Backend** (`CUDA` for NVIDIA GPUs, auto-detected when an NVIDIA
+   driver is present; `Vulkan` for AMD/Intel/NVIDIA) and **Model** in the GUI.
+3. Click **Download Runtime** (once per backend/build) and **Download Model**
+   (once per model). Downloads are resumable, pre-checked for free disk space,
+   and verified with SHA-256.
+4. Click **Start Provider**. Closing the window minimizes to the system tray;
+   use **Exit** from the tray menu (or `Ctrl+C` in `--headless` mode) to stop
+   `llama-server` and quit cleanly.
+
+To update later, simply replace the `thinkfarm-provider` executable — your
+config, cached runtime, and model weights in `~/.thinkfarm/` are preserved.
+
+## Running from source
+
+You can also run directly from this folder without building an executable
+(requires Python 3.10+):
+
+```bash
+./thinkfarm.sh                           # Linux GUI (creates ./venv if needed)
+./thinkfarm.sh --headless                # Linux headless daemon
+./thinkfarm.sh --download [--model NAME] # Download runtime + model weights
+```
+
+On Windows, use `thinkfarm.bat` with the same flags.
+
+## Building the single-file executable
+
+PyInstaller builds native executables (no cross-compilation):
+
+```bash
+# Linux (outputs dist/thinkfarm-provider)
+./build-onefile.sh
+```
+
+```powershell
+# Windows (outputs dist\thinkfarm-provider.exe)
+.\build-onefile.ps1
+```
+
+> **Linux portability note:** PyInstaller links against the host's `glibc`. To
+> distribute a Linux binary that runs across older and newer distros, run
+> `./build-onefile.sh` inside an older-glibc container (e.g. Ubuntu 22.04).
+
+Legacy tarball/zip bundles (with pre-packed `bin/` and `wheelhouse/`) can still
+be built with `./build.sh [linux-cuda | linux-vulkan | win-cuda | win-vulkan | all]`.
 
 ## Requirements
 
-- **Linux x86_64** (the bundled binaries are x64/x86_64 — no aarch64 build here)
-- **NVIDIA driver only** — no CUDA toolkit, no Ollama, no separate
-  `llama-server` needed. The CUDA runtime libraries (`libcudart.so.13`,
-  `libcublas*`, ...) are bundled in `cudart-llama-b11064-bin-ubuntu-cuda-13.3-x64/`. The driver must
-  support CUDA 13 (driver 580+/590+). The app finds `libcuda.so.1` from
-  standard `/usr/lib*` locations or a nix store.
-- **GPU memory ≈ 19 GB+ total** for the model + draft + projector
-  (16.5 GB main GGUF, 1.4 GB MTP draft, 0.9 GB mmproj). It splits across all
-  visible NVIDIA GPUs (tested: RTX 4080 16 GB + RTX 3080 12 GB). A single GPU
-  needs headroom for all three weights plus KV cache (~20 GB+).
-- **Python 3.10+**. Only two runtime deps for headless mode (`httpx`,
-  `websockets`). The GUI adds `PyQt6`. If the current interpreter lacks them,
-  `thinkfarm.sh` creates `./venv` and installs them once (offline bundles ship a
-  `wheelhouse/`; PyQt6 wheels are included when available at build time).
+- **OS**: Linux x86_64 or Windows x64
+- **GPU**:
+  - **CUDA backend**: NVIDIA driver supporting CUDA 13 (no CUDA toolkit needed;
+    `cudart` / `cublas` are downloaded with the runtime). On Linux, the app
+    locates `libcuda.so.1` in standard `/usr/lib*` paths or the Nix store.
+  - **Vulkan backend**: Any Vulkan-capable GPU driver (AMD, Intel, or NVIDIA).
+- **Network**: Access to `https://app.thinkfarm.eu`, GitHub Releases (for
+  runtime downloads), and Hugging Face (for model weights).
 
-## What ships where
+## File layout
 
-| Path | Content |
+### User data (`~/.thinkfarm/`)
+| Path | Purpose |
 |---|---|
-| `app.py` | the app: spawns the child llama-server, waits for readiness, runs lcpp's provider daemon, clean shutdown |
-| `gui.py` | PyQt6 dashboard (same worker flow as `app.py`, in a thread; default mode of `./thinkfarm.sh`) |
-| `downloader.py` | resumable chunked model downloader with Range resume, progress reporting, and SHA256 checks |
-| `thinkfarm.sh` | one-command launcher (`--headless` for the daemon) |
-| `lcpp/` | provider client + protocol code (reused as-is; `provider-protocol.md` is the protocol spec) |
-| `llama-b11064/` | `llama-server` binary + its `.so` files (llama.cpp b11064, CUDA 13) |
-| `cudart-llama-b11064-bin-ubuntu-cuda-13.3-x64/` | bundled CUDA runtime libraries |
-| `qwen3.8-27b/` | model, vision projector, MTP draft GGUFs (canonical invocation: `qwen3.8-27b/oqwen.sh`) |
-| `logs/` | `llama-server.log` (child server output), `app-run.log` when run via `nohup ./thinkfarm.sh` |
+| `~/.thinkfarm/custom.ini` | Provider config (auto-created on first run) |
+| `~/.thinkfarm/.env` | Optional environment overrides (`CENTRAL_SERVER_URL`, etc.) |
+| `~/.thinkfarm/runtime/<os>-<backend>-b12431/` | Downloaded & extracted `llama-server` (+ `cudart/` on Linux CUDA) |
+| `~/.thinkfarm/models/<model>/` | Downloaded GGUF weights (override with `MODELS_PATH`) |
+| `~/.thinkfarm/logs/llama-server.log` | Child `llama-server` output (appended per start) |
+
+### Project files
+| Path | Purpose |
+|---|---|
+| `entrypoint.py` | Unified PyInstaller entry point (routes CLI flags vs GUI) |
+| `app.py` | Headless provider + `LlamaServer` child-process lifecycle |
+| `gui.py` | PyQt6 dashboard (config, runtime/model downloads, status, logs, tray) |
+| `runtime.py` | Runtime backend detection, pinned GitHub Release download, SHA-256 verification, and extraction |
+| `downloader.py` | Resumable chunked downloader with progress reporting and SHA-256 verification |
+| `lcpp/` | Shared provider client, `ConfigManager`, and protocol docs |
+| `thinkfarm-provider.spec` | PyInstaller `--onefile` spec |
+| `build-onefile.sh` / `build-onefile.ps1` | Single-file executable build scripts |
 
 ## Configuration
 
-Reuses the standard thinkfarm provider config: `custom.ini`
-(`provider_id`, `slots`, ...) next to the app. Defaults to the public central server `https://app.thinkfarm.eu`.
+`~/.thinkfarm/custom.ini` is created automatically on first run:
 
-- `LOCAL_PORT` (env, default: a free ephemeral port) — pin the llama-server
-  port you own, e.g. `LOCAL_PORT=8086 ./thinkfarm.sh`.
-- `READY_TIMEOUT` (env seconds, default 1800) — how long to wait for the
-  child to report ready.
-- `MODELS_PATH` (`custom.ini`, `[provider]`) — relocate where model weights
-  are downloaded and loaded from, e.g. `MODELS_PATH=/mnt/persist/models`
-  (per-model subfolders like `qwen3.8-27b/` are kept underneath it).
-- `LLAMA_ARGS` (`custom.ini` `[provider]` or env) — pass extra flags to the child
-  `llama-server` (e.g. `LLAMA_ARGS = --tensor-split 57,43`).
+```ini
+[provider]
+provider_id = <generated-uuid>
+slots = 1
+models_path =
+backend =
+selected_model =
+llama_args =
+```
 
-## Gotchas
+Leaving optional keys blank is safe and uses defaults:
+- `provider_id`: Your provider identity (auto-generated UUID if blank).
+- `slots`: Concurrent jobs / `llama-server --parallel` (default `1`). Each slot
+  allocates its own KV cache, so only raise this if you have VRAM headroom.
+- `models_path` (or `MODELS_PATH` env var): Relocate model downloads/loading
+  (default `~/.thinkfarm/models`), keeping per-model subfolders underneath.
+- `backend` (or `THINKFARM_BACKEND` env var / `--backend`): `cuda` or `vulkan`
+  (blank = auto-detect).
+- `selected_model` (or `THINKFARM_MODEL` env var / `--model`): Which model to
+  load (default `qwen3.8-27b`).
+- `llama_args` (or `LLAMA_ARGS` env var): Extra flags passed verbatim to
+  `llama-server` (e.g. `--tensor-split 57,43`).
 
-- x64 binaries only; needs a recent glibc (built/tested against glibc 2.42).
-- First load reads ~19 GB of weights from disk — allow up to a minute or two.
-- Server logs land in `logs/llama-server.log` (appended per start).
-- If the child fails to start, the app exits and prints the last server log
-  lines; check the driver (`nvidia-smi`) and GPU memory.
+Additional environment variables:
+- `LOCAL_PORT`: Pin the local `llama-server` port (default: free ephemeral port).
+- `READY_TIMEOUT`: Seconds to wait for model load readiness (default `1800`).

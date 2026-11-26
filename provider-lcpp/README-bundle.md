@@ -28,9 +28,10 @@ time, only the GUI needs network on first run — headless is unaffected.
 
 ## Models
 
-Each model lives in its own folder; exactly one is loaded at a time (they never
-run simultaneously). Choose with `--model NAME`, the `THINKFARM_MODEL` env var,
-or the Model dropdown in the GUI (persisted to `custom.ini`):
+Each model lives in its own folder under `~/.thinkfarm/models/` by default;
+exactly one is loaded at a time (they never run simultaneously). Choose with
+`--model NAME`, the `THINKFARM_MODEL` env var, or the Model dropdown in the GUI
+(persisted to `~/.thinkfarm/custom.ini`):
 
 - `qwen3.8-27b/` (default) — `Qwen3.8-27B-UD-Q4_K_M.gguf`, `mmproj-BF16.gguf`,
   `mtp-Qwen3.8-27B-Q4_0.gguf` (MTP draft for speculative decoding)
@@ -40,10 +41,11 @@ or the Model dropdown in the GUI (persisted to `custom.ini`):
 - `spark-x2.6-4b/` — `Spark-X2.6-4B-Q8_0.gguf`
 - `nemotron-3.5-30b/` — `Nemotron-3.5-Lightning-30B-A3B-NVFP4.gguf`
 
-By default each model downloads into and loads from its folder next to the app.
+By default each model downloads into and loads from `~/.thinkfarm/models/<name>/`,
+so updating to a new release folder keeps your existing weights and config intact.
 To store weights elsewhere (e.g. a bigger disk), set `MODELS_PATH` in
-`custom.ini` — both download and load use it, keeping the same
-per-model subfolders:
+`~/.thinkfarm/custom.ini` (or via the `MODELS_PATH` env var) — both download
+and load use it, keeping the same per-model subfolders:
 
     [provider]
     MODELS_PATH = /mnt/persist/models
@@ -58,13 +60,13 @@ server and uses it to gate job acceptance.
 
 ## Config
 
-Read from `custom.ini` (provider id, slots, etc.) and optional `.env`
-next to the app.
+Read from `~/.thinkfarm/custom.ini` (provider id, slots, etc.) and optional
+`~/.thinkfarm/.env`.
 
-Slots: set `SLOTS = N` under `[provider]` in `custom.ini` (default 1). It controls
+Slots: set `SLOTS = N` under `[provider]` in `~/.thinkfarm/custom.ini` (default 1). It controls
 both how many concurrent jobs the node accepts and llama-server's `--parallel`.
 Each slot needs its own KV cache, so raise it only if your VRAM has room. Change
 takes effect on restart. Set `LLAMA_ARGS` under `[provider]` (or via environment variable)
 to pass custom flags to llama-server (e.g. `LLAMA_ARGS = --tensor-split 57,43`).
-Logs go to `logs/llama-server.log`. Stop: **Exit** from the tray
+Logs go to `~/.thinkfarm/logs/llama-server.log`. Stop: **Exit** from the tray
 menu (GUI) or Ctrl+C (`--headless`) — the llama-server child is terminated cleanly.

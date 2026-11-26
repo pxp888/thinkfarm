@@ -4,6 +4,9 @@ from configparser import ConfigParser, NoSectionError
 from pathlib import Path
 
 
+DEFAULT_DATA_DIR = Path.home() / ".thinkfarm"
+
+
 class ConfigManager:
     _SECTION_PROVIDER = "provider"
     _SECTION_CONSUMER = "consumer"
@@ -12,8 +15,7 @@ class ConfigManager:
         if workspace_dir:
             self.workspace_dir = Path(workspace_dir)
         else:
-            pkg_dir = Path(__file__).resolve().parent
-            self.workspace_dir = pkg_dir.parent if pkg_dir.name == "lcpp" else pkg_dir
+            self.workspace_dir = DEFAULT_DATA_DIR
         self.config_dir = self.workspace_dir
         self.config_path = self.workspace_dir / "custom.ini"
         self.env_path = self.workspace_dir / ".env"
@@ -35,53 +37,73 @@ class ConfigManager:
         self.model_name: str = ""
         self.model_digest: str = ""
         self.selected_model: str = ""  # which bundled model the provider-lcpp app should load
+        self.backend: str = ""  # runtime backend override ("cuda" or "vulkan"); empty = auto-detect
         self.lccp_context: int = 0  # explicit context limit for job acceptance (0 = use probed cache, -1 = unlimited)
         self.llama_args: str = ""  # extra flags passed to bundled llama-server (e.g. --tensor-split 57,43)
 
         self.load()
 
+    def _ensure_config_file(self):
+        """Create a starter custom.ini on first run so users can easily edit it."""
+        if self.config_path.exists():
+            return
+        os.makedirs(self.config_path.parent, exist_ok=True)
+        template = (
+            "[provider]\n"
+            f"provider_id = {self.provider_id}\n"
+            f"slots = {self.slots}\n"
+            f"models_path = {self.models_path}\n"
+            f"backend = {self.backend}\n"
+            f"selected_model = {self.selected_model}\n"
+            f"llama_args = {self.llama_args}\n"
+        )
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write(template)
+
     def load(self):
-        if not self.config_path.exists():
+        if not self.config_path.exists() and not self.env_path.exists():
+            self._ensure_config_file()
             return
 
         raw = ConfigParser()
-        raw.read(self.config_path, encoding="utf-8")
+        if self.config_path.exists():
+            raw.read(self.config_path, encoding="utf-8")
 
-        # Migrate old "client" section to "provider" and "consumer" sections
-        if raw.has_section("client"):
-            if not raw.has_section(self._SECTION_PROVIDER):
-                raw.add_section(self._SECTION_PROVIDER)
-            if not raw.has_section(self._SECTION_CONSUMER):
-                raw.add_section(self._SECTION_CONSUMER)
-            
-            for option in raw.options("client"):
-                val = raw.get("client", option)
-                opt_upper = option.upper()
-                if opt_upper in ["CONSUMER_ID", "CLIENT_PORT", "WHITELIST_ENABLED", "WHITELIST_MODELS"]:
-                    raw.set(self._SECTION_CONSUMER, option, val)
-                else:
-                    raw.set(self._SECTION_PROVIDER, option, val)
-            raw.remove_section("client")
-            # Save migrated file
-            os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                raw.write(f)
-
-        # Tolerate files written without section headers (dotenv-style)
-        if not raw.sections():
-            raw.add_section(self._SECTION_PROVIDER)
-            raw.add_section(self._SECTION_CONSUMER)
-            for line in self.config_path.read_text().strip().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    k, v_val = line.split("=", 1)
-                    k_upper = k.strip().upper()
-                    if k_upper in ["CONSUMER_ID", "CLIENT_PORT", "WHITELIST_ENABLED", "WHITELIST_MODELS"]:
-                        raw.set(self._SECTION_CONSUMER, k.strip(), v_val.strip())
+            # Migrate old "client" section to "provider" and "consumer" sections
+            if raw.has_section("client"):
+                if not raw.has_section(self._SECTION_PROVIDER):
+                    raw.add_section(self._SECTION_PROVIDER)
+                if not raw.has_section(self._SECTION_CONSUMER):
+                    raw.add_section(self._SECTION_CONSUMER)
+                
+                for option in raw.options("client"):
+                    val = raw.get("client", option)
+                    opt_upper = option.upper()
+                    if opt_upper in ["CONSUMER_ID", "CLIENT_PORT", "WHITELIST_ENABLED", "WHITELIST_MODELS"]:
+                        raw.set(self._SECTION_CONSUMER, option, val)
                     else:
-                        raw.set(self._SECTION_PROVIDER, k.strip(), v_val.strip())
+                        raw.set(self._SECTION_PROVIDER, option, val)
+                raw.remove_section("client")
+                # Save migrated file
+                os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+                with open(self.config_path, "w", encoding="utf-8") as f:
+                    raw.write(f)
+
+            # Tolerate files written without section headers (dotenv-style)
+            if not raw.sections():
+                raw.add_section(self._SECTION_PROVIDER)
+                raw.add_section(self._SECTION_CONSUMER)
+                for line in self.config_path.read_text().strip().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        k, v_val = line.split("=", 1)
+                        k_upper = k.strip().upper()
+                        if k_upper in ["CONSUMER_ID", "CLIENT_PORT", "WHITELIST_ENABLED", "WHITELIST_MODELS"]:
+                            raw.set(self._SECTION_CONSUMER, k.strip(), v_val.strip())
+                        else:
+                            raw.set(self._SECTION_PROVIDER, k.strip(), v_val.strip())
         
         env_vals: dict[str, str] = {}
         if self.env_path.exists():
@@ -125,6 +147,7 @@ class ConfigManager:
         self.model_name = v(self._SECTION_PROVIDER, "MODEL_NAME", "") or ""
         self.model_digest = v(self._SECTION_PROVIDER, "MODEL_DIGEST", "") or ""
         self.selected_model = v(self._SECTION_PROVIDER, "SELECTED_MODEL", "") or ""
+        self.backend = (v(self._SECTION_PROVIDER, "BACKEND", "") or "").strip().lower()
 
         lc = v(self._SECTION_PROVIDER, "lccp_context", "") or ""
         try:
@@ -152,6 +175,9 @@ class ConfigManager:
         # Lists
         wl_raw = raw.get(self._SECTION_CONSUMER, "WHITELIST_MODELS", fallback=None) or env_vals.get("WHITELIST_MODELS") or ""
         self.whitelist_models = [m.strip() for m in wl_raw.split(",") if m.strip()]
+
+        if not self.config_path.exists():
+            self._ensure_config_file()
 
     def save(self):
         raw = ConfigParser()
@@ -202,6 +228,11 @@ class ConfigManager:
             raw.set(self._SECTION_PROVIDER, "SELECTED_MODEL", self.selected_model)
         elif raw.has_option(self._SECTION_PROVIDER, "SELECTED_MODEL"):
             raw.remove_option(self._SECTION_PROVIDER, "SELECTED_MODEL")
+
+        if self.backend in ("cuda", "vulkan"):
+            raw.set(self._SECTION_PROVIDER, "BACKEND", self.backend)
+        elif raw.has_option(self._SECTION_PROVIDER, "BACKEND"):
+            raw.remove_option(self._SECTION_PROVIDER, "BACKEND")
 
         # Only persist lccp_context if explicitly set (non-zero)
         if self.lccp_context != 0:

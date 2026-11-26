@@ -27,8 +27,11 @@ from pathlib import Path
 # Ensure PyQt6-related speedups are never imported (saves time/memory)
 sys.modules["websockets.speedups"] = None
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT / "lcpp"))  # reuse lcpp's provider implementation
+ROOT = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+DATA_DIR = Path.home() / ".thinkfarm"
+DEFAULT_MODELS_DIR = DATA_DIR / "models"
+if str(ROOT / "lcpp") not in sys.path:
+    sys.path.insert(0, str(ROOT / "lcpp"))  # reuse lcpp's provider implementation
 
 from downloader import (
     ModelFileArtifact,
@@ -37,40 +40,54 @@ from downloader import (
     format_eta,
     ProgressInfo,
 )
+from runtime import (
+    BACKEND_LABELS,
+    RUNTIME_VERSION,
+    detect_default_backend,
+    download_and_extract_runtime,
+    find_driver_dirs,
+    required_runtime_binaries,
+    resolve_runtime_paths,
+    runtime_status,
+)
 from config import ConfigManager  # noqa: E402
 from provider_client import ProviderClient  # noqa: E402
 
-# --- bundled layout ---------------------------------------------------------
-# Standard bundle layout uses bin/ (and optional cudart/); fall back to legacy folders.
-BIN_DIR = ROOT / "bin" if (ROOT / "bin").exists() else ROOT / "llama-b11064"
-CUDART_DIR = ROOT / "cudart" if (ROOT / "cudart").exists() else ROOT / "cudart-llama-b11064-bin-ubuntu-cuda-13.3-x64"
-SERVER_BIN = BIN_DIR / ("llama-server.exe" if sys.platform == "win32" else "llama-server")
+
+def parse_backend_arg(argv: list[str]) -> str | None:
+    """Value of --backend cuda|vulkan (also accepts --backend=NAME) from argv, else None."""
+    for i, a in enumerate(argv):
+        if a == "--backend":
+            if i + 1 >= len(argv):
+                print(f"[app] ERROR: --backend needs a value. Valid backends: {', '.join(BACKEND_LABELS)}", file=sys.stderr)
+                sys.exit(1)
+            return argv[i + 1].strip().lower()
+        if a.startswith("--backend="):
+            return a.split("=", 1)[1].strip().lower()
+    return None
 
 
-def is_cuda_backend() -> bool:
-    """Detect whether the bundled binaries use the CUDA backend."""
-    if CUDART_DIR.exists():
-        return True
-    return (BIN_DIR / "libggml-cuda.so").exists() or (BIN_DIR / "ggml-cuda.dll").exists()
+def resolve_backend(cli_value: str | None = None, saved: str = "") -> str:
+    """Pick which runtime backend to use: --backend > THINKFARM_BACKEND > saved > auto-detect."""
+    for cand in (cli_value, os.environ.get("THINKFARM_BACKEND"), saved):
+        if not cand:
+            continue
+        cand = cand.strip().lower()
+        if cand in BACKEND_LABELS:
+            return cand
+        print(f"[app] ERROR: unknown backend '{cand}'. Valid backends: {', '.join(BACKEND_LABELS)}", file=sys.stderr)
+        sys.exit(1)
+    return detect_default_backend()
 
 
-def required_binaries() -> list[Path]:
+def required_binaries(backend: str | None = None) -> list[Path]:
     """Binaries and runtime libraries required to launch llama-server."""
-    bins = [SERVER_BIN]
-    if is_cuda_backend():
-        if sys.platform == "win32":
-            cuda_dlls = list(CUDART_DIR.glob("cudart64_*.dll")) + list(BIN_DIR.glob("cudart64_*.dll"))
-            if cuda_dlls:
-                bins.append(cuda_dlls[0])
-            else:
-                bins.append(CUDART_DIR / "cudart64_13.dll")
-        else:
-            cudarts = list(CUDART_DIR.glob("libcudart.so.*")) + list(BIN_DIR.glob("libcudart.so.*"))
-            if cudarts:
-                bins.append(cudarts[0])
-            else:
-                bins.append(CUDART_DIR / "libcudart.so.13")
-    return bins
+    return required_runtime_binaries(backend or detect_default_backend(), ROOT)
+
+
+def runtime_download_status(backend: str) -> dict:
+    """Check install/download status for the selected backend runtime."""
+    return runtime_status(backend, ROOT)
 # --- bundled models ---------------------------------------------------------
 # Exactly one of these is loaded into the child llama-server at a time. They
 # are not co-resident: weights don't fit in VRAM together and they never need
@@ -95,7 +112,7 @@ class ModelSpec:
 MODELS = {
     "qwen3.8-27b": ModelSpec(
         label="Qwen3.8 27B",
-        directory=ROOT / "qwen3.8-27b",
+        directory=DEFAULT_MODELS_DIR / "qwen3.8-27b",
         main_model=Path("Qwen3.8-27B-UD-Q4_K_M.gguf"),
         mmproj=Path("mmproj-BF16.gguf"),
         extra_args=(
@@ -131,7 +148,7 @@ MODELS = {
     ),
     "qwen3.6-35b": ModelSpec(
         label="Qwen3.6 35B-A3B (MoE)",
-        directory=ROOT / "qwen3.6-35b",
+        directory=DEFAULT_MODELS_DIR / "qwen3.6-35b",
         main_model=Path("Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"),
         mmproj=Path("mmproj-BF16.gguf"),
         extra_args=(
@@ -158,7 +175,7 @@ MODELS = {
     ),
     "qwen3.5-9b": ModelSpec(
         label="Qwen3.5 9B",
-        directory=ROOT / "qwen3.5-9b",
+        directory=DEFAULT_MODELS_DIR / "qwen3.5-9b",
         main_model=Path("Qwen3.5-9B-Q4_K_M.gguf"),
         mmproj=Path("mmproj-BF16.gguf"),
         # MTP module is baked into the main GGUF (unsloth -MTP-GGUF repo); no
@@ -189,7 +206,7 @@ MODELS = {
     ),
     "spark-x2.6-4b": ModelSpec(
         label="Spark X2.6 4B",
-        directory=ROOT / "spark-x2.6-4b",
+        directory=DEFAULT_MODELS_DIR / "spark-x2.6-4b",
         main_model=Path("Spark-X2.6-4B-Q8_0.gguf"),
         extra_args=(
             ("-fa", "on"),
@@ -209,7 +226,7 @@ MODELS = {
     ),
     "nemotron-3.5-30b": ModelSpec(
         label="Nemotron 3.5 30B-A3B (MoE)",
-        directory=ROOT / "nemotron-3.5-30b",
+        directory=DEFAULT_MODELS_DIR / "nemotron-3.5-30b",
         main_model=Path("Nemotron-3.5-Lightning-30B-A3B-NVFP4.gguf"),
         extra_args=(
             ("-fa", "on"),
@@ -232,12 +249,11 @@ DEFAULT_MODEL = "qwen3.8-27b"
 
 
 def apply_models_dir(config) -> None:
-    """Rebind model folders to MODELS_PATH (custom.ini / .env). Affects both
-    the download target and where llama-server loads from; empty = next to
-    the app."""
-    if not config.models_path:
-        return
-    base = Path(os.path.expanduser(config.models_path))
+    """Rebind model folders to MODELS_PATH (custom.ini / .env / env var) if set,
+    otherwise default to ~/.thinkfarm/models. Affects both the download target
+    and where llama-server loads from."""
+    override = config.models_path or os.environ.get("MODELS_PATH", "")
+    base = Path(os.path.expanduser(override)) if override else DEFAULT_MODELS_DIR
     for name in MODELS:
         MODELS[name] = replace(MODELS[name], directory=base / name)
 
@@ -358,6 +374,50 @@ def run_cli_download(model_name: str):
         print(f"\n[download] ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
+def run_cli_runtime_download(backend: str):
+    """Download and extract the llama-server runtime from the command line."""
+    status = runtime_download_status(backend)
+    label = BACKEND_LABELS.get(backend, backend)
+    if status["installed"]:
+        print(f"[runtime] Runtime '{label}' ({RUNTIME_VERSION}) is already installed ({status['runtime_dir']}).")
+        return
+
+    rem_fmt = format_bytes(status["remaining_bytes"])
+    print(f"[runtime] Downloading {label} runtime {RUNTIME_VERSION} ({rem_fmt} remaining)...")
+    print(f"[runtime] Target directory: {status['runtime_dir']}")
+
+    last_line_len = 0
+
+    def on_progress(p: ProgressInfo):
+        nonlocal last_line_len
+        msg = (
+            f"[{p.file_index}/{p.total_files}] {p.filename}: {p.file_percent:5.1f}% "
+            f"({format_bytes(p.file_bytes_done)}/{format_bytes(p.file_bytes_total)}) • "
+            f"{format_bytes(p.speed_bps)}/s • ETA {format_eta(p.eta_seconds)}"
+        )
+        out = chr(13) + "[runtime] " + msg
+        pad = " " * max(0, last_line_len - len(out))
+        print(out + pad, end="", flush=True)
+        last_line_len = len(out)
+
+    def on_status(msg: str):
+        print(f"\n[runtime] {msg}", flush=True)
+
+    try:
+        download_and_extract_runtime(
+            backend,
+            progress_callback=on_progress,
+            status_callback=on_status,
+        )
+        print(f"[runtime] Runtime '{label}' ({RUNTIME_VERSION}) ready!")
+    except KeyboardInterrupt:
+        print("\n[runtime] Download paused (Ctrl+C). Resume any time by running --download-runtime again.")
+        sys.exit(130)
+    except Exception as e:
+        print(f"\n[runtime] ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def apply_publish_info(cfg, name: str):
     """Point config at the model's published name/digest."""
     m = MODELS[name]
@@ -368,7 +428,7 @@ def apply_publish_info(cfg, name: str):
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("LOCAL_PORT", "8086"))  # 8086 = oqwen.sh's host mapping
 
-LOG_DIR = ROOT / "logs"
+LOG_DIR = DATA_DIR / "logs"
 SERVER_LOG = LOG_DIR / "llama-server.log"
 
 READY_TIMEOUT = float(os.environ.get("READY_TIMEOUT", "1800"))  # generous; a dead child trips this fast
@@ -386,15 +446,23 @@ def pick_port() -> int:
         return s.getsockname()[1]
 
 
-def build_args(port: int, name: str, slots: int = 1, config: ConfigManager | None = None) -> list[str]:
+def build_args(
+    port: int,
+    name: str,
+    slots: int = 1,
+    config: ConfigManager | None = None,
+    backend: str | None = None,
+) -> list[str]:
     """Canonical invocation of a bundled model (Qwen3.x sampling per oqwen.sh).
 
     `slots` maps to llama-server's --parallel; each slot gets its own KV cache,
     so VRAM usage grows with it."""
     m = MODELS[name]
     alias = m.publish_name or name
+    resolved_backend = backend or (config.backend if config and config.backend else detect_default_backend())
+    _, _, server_bin, _ = resolve_runtime_paths(resolved_backend, ROOT)
     args = [
-        str(SERVER_BIN),
+        str(server_bin),
         "-m", str(m.directory / m.main_model),
         "--alias", alias,
         "--host", HOST,
@@ -426,7 +494,7 @@ def build_args(port: int, name: str, slots: int = 1, config: ConfigManager | Non
             llama_args = config.llama_args
         else:
             try:
-                cfg = ConfigManager(str(ROOT))
+                cfg = ConfigManager()
                 llama_args = cfg.llama_args
             except Exception:
                 pass
@@ -438,25 +506,6 @@ def build_args(port: int, name: str, slots: int = 1, config: ConfigManager | Non
     return args
 
 
-def find_driver_dirs() -> list[str]:
-    """Locate the nvidia driver's libcuda.so.1 for the child's loader path.
-
-    Standard distros ship it in /usr/lib* (loader finds it anyway; appending is
-    harmless). nix-based systems keep it in the nix store, which a plain process
-    does not search — so find it explicitly there. Target box only needs the
-    nvidia driver (no CUDA toolkit) to run this app.
-    """
-    import glob
-
-    found: list[str] = []
-    for pat in ("/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib",
-                "/nix/store/*-nvidia-x11-[0-9.]*-lib/lib", "/nix/store/*-nvidia-x11-[0-9.]*/lib"):
-        for d in glob.glob(pat):
-            if Path(d, "libcuda.so.1").exists() and d not in found:
-                found.append(d)
-    return found
-
-
 class LlamaServer:
     """Owns the child llama-server process."""
 
@@ -466,33 +515,42 @@ class LlamaServer:
         model_name: str = DEFAULT_MODEL,
         slots: int = 1,
         config: ConfigManager | None = None,
+        backend: str | None = None,
     ):
         self.port = port
         self.model_name = model_name
         self.slots = max(1, int(slots))
         self.config = config
+        self.backend = backend or (config.backend if config and config.backend else detect_default_backend())
         self.proc: subprocess.Popen | None = None
         self.log_file = None
 
     def start(self):
-        args = build_args(self.port, self.model_name, self.slots, self.config)
-        LOG_DIR.mkdir(exist_ok=True)
+        bin_dir, cudart_dir, _, _ = resolve_runtime_paths(self.backend, ROOT)
+        args = build_args(self.port, self.model_name, self.slots, self.config, self.backend)
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ)
         # Configure shared library / DLL search paths
         if sys.platform == "win32":
-            paths = [str(BIN_DIR)]
-            if CUDART_DIR.exists():
-                paths.append(str(CUDART_DIR))
+            paths = [str(bin_dir)]
+            if cudart_dir.exists():
+                paths.append(str(cudart_dir))
             if env.get("PATH"):
                 paths.append(env["PATH"])
             env["PATH"] = os.pathsep.join(paths)
         else:
-            paths = [str(BIN_DIR)]
-            if is_cuda_backend() and CUDART_DIR.exists():
-                paths.insert(0, str(CUDART_DIR))
+            # In a frozen PyInstaller binary, LD_LIBRARY_PATH points to _MEIPASS
+            # (which contains Qt/Python libs that can conflict with llama-server).
+            # Restore the pre-PyInstaller LD_LIBRARY_PATH before prepending runtime dirs.
+            orig_ld = env.get("LD_LIBRARY_PATH_ORIG") if getattr(sys, "frozen", False) else env.get("LD_LIBRARY_PATH")
+            paths = [str(bin_dir)]
+            if self.backend == "cuda" and cudart_dir.exists():
+                paths.insert(0, str(cudart_dir))
                 paths.extend(find_driver_dirs())
-            if env.get("LD_LIBRARY_PATH"):
-                paths.append(env["LD_LIBRARY_PATH"])
+            elif self.backend == "cuda":
+                paths.extend(find_driver_dirs())
+            if orig_ld:
+                paths.append(orig_ld)
             env["LD_LIBRARY_PATH"] = os.pathsep.join(paths)
 
         self.log_file = open(SERVER_LOG, "ab", buffering=0)
@@ -576,25 +634,34 @@ def main():
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-    config = ConfigManager(str(ROOT))
+    config = ConfigManager()
     apply_models_dir(config)
     model_name = resolve_model(parse_model_arg(sys.argv), saved=config.selected_model)
+    backend = resolve_backend(parse_backend_arg(sys.argv), saved=config.backend)
+
+    if "--download-runtime" in sys.argv:
+        run_cli_runtime_download(backend)
+        sys.exit(0)
 
     if "--download" in sys.argv:
+        run_cli_runtime_download(backend)
         run_cli_download(model_name)
         sys.exit(0)
 
     apply_publish_info(config, model_name)
-    missing_bins = [p for p in required_binaries() if not p.exists()]
+    missing_bins = [p for p in required_binaries(backend) if not p.exists()]
     missing_models = [p for p in model_files(model_name) if not p.exists()]
     if missing_bins or missing_models:
-        for p in missing_bins:
-            print(f"[app] ERROR: required binary missing: {p}", file=sys.stderr)
+        if missing_bins:
+            print(f"[app] ERROR: runtime binaries missing for backend '{backend}':", file=sys.stderr)
+            for p in missing_bins:
+                print(f"[app]   - {p}", file=sys.stderr)
+            print(f"[app] Run with '--download-runtime --backend {backend}' to download them automatically.", file=sys.stderr)
         if missing_models:
             print(f"[app] ERROR: model files missing for '{model_name}':", file=sys.stderr)
             for p in missing_models:
                 print(f"[app]   - {p}", file=sys.stderr)
-            print(f"[app] Run './thinkfarm.sh --download --model {model_name}' to download them automatically.", file=sys.stderr)
+            print(f"[app] Run with '--download --model {model_name}' to download them automatically.", file=sys.stderr)
         sys.exit(1)
 
     port = pick_port()
@@ -612,7 +679,7 @@ def main():
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, lambda *_: _sigint_handler())
 
-    runner = LlamaServer(port, model_name, config.slots, config)
+    runner = LlamaServer(port, model_name, config.slots, config, backend=backend)
 
     async def run():
         runner.start()
